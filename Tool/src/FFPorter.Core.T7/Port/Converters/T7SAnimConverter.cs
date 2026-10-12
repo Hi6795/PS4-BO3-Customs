@@ -10,6 +10,7 @@ public sealed class T7SAnimConverter : IT7AssetConverter, IT7NestedConverter, IT
     public const int HeaderSize = 112, PcTextureSize = 136, Ps4TextureSize = 208, TrailerSize = 12, PcLayoutAt = 0x58, Ps4LayoutAt = 0xA0;
 
     private const int PcFormat = 10, KeyTag = 7;
+    private const uint MinimumPitch = 8;
     private const int KeyAt = 8, SizeAt = 0x34, InlineAt = 0x38, KeptPrefix = 0x40, FormatAt = PcLayoutAt + 36;
 
     public string Name => "sanim";
@@ -184,7 +185,7 @@ public sealed class T7SAnimConverter : IT7AssetConverter, IT7NestedConverter, IT
             return false;
         }
         uint ps4Base = Align(width, 64) * 16;
-        uint pitch = Align(width, 64 / Gcd(frames, 64));
+        uint pitch = Align(width, Math.Max(MinimumPitch, 64 / Gcd(frames, 64)));
         uint ps4Frame = pitch * texel, ps4SecondRow = pitch * texel2;
         uint ps4Second = ps4Base + frames * ps4Frame;
         layout = new Layout(width, frames, ps4Base, ps4Frame, ps4SecondRow, ps4Second, ps4Second + frames * ps4SecondRow,

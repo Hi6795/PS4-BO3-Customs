@@ -54,14 +54,23 @@ public static class T7DxbcCode
             DclFunctionBody = 144, DclFunctionTable = 145, DclInterface = 146, DclThreadGroup = 155, DclUavTyped = 156, DclUavRaw = 157,
             DclUavStructured = 158, DclTgsmRaw = 159, DclTgsmStructured = 160, DclResourceRaw = 161, DclResourceStructured = 162,
             LdUavTyped = 163, StoreUavTyped = 164, LdRaw = 165, StoreRaw = 166, LdStructured = 167, StoreStructured = 168,
-            ImmAtomicIAdd = 180;
+            AtomicAnd = 169, AtomicOr = 170, AtomicXor = 171, AtomicCmpStore = 172, AtomicIAdd = 173, AtomicIMax = 174, AtomicIMin = 175,
+            AtomicUMax = 176, AtomicUMin = 177, ImmAtomicAlloc = 178, ImmAtomicConsume = 179, ImmAtomicIAdd = 180, ImmAtomicAnd = 181, ImmAtomicOr = 182, ImmAtomicXor = 183,
+            ImmAtomicExch = 184, ImmAtomicCmpExch = 185, ImmAtomicIMax = 186, ImmAtomicIMin = 187, ImmAtomicUMax = 188,
+            ImmAtomicUMin = 189, EvalSnapped = 203, EvalSampleIndex = 204, EvalCentroid = 205,
+            HsDecls = 113, HsControlPointPhase = 114, HsForkPhase = 115, HsJoinPhase = 116, DclStream = 143,
+            DclInputControlPointCount = 147, DclOutputControlPointCount = 148, DclTessDomain = 149, DclTessPartitioning = 150,
+            DclTessOutputPrimitive = 151, DclHsMaxTessFactor = 152, DclHsForkPhaseInstanceCount = 153,
+            DclHsJoinPhaseInstanceCount = 154, DclGsInstanceCount = 206;
     }
 
     public static class OperandType
     {
         public const int Temp = 0, Input = 1, Output = 2, IndexableTemp = 3, Immediate32 = 4, Immediate64 = 5, Sampler = 6, Resource = 7,
             ConstantBuffer = 8, ImmediateConstantBuffer = 9, Label = 10, InputPrimitiveId = 11, OutputDepth = 12, Null = 13,
-            Rasterizer = 14, OutputCoverageMask = 15, UnorderedAccessView = 30;
+            Rasterizer = 14, OutputCoverageMask = 15, OutputControlPointId = 22, ForkInstanceId = 23, JoinInstanceId = 24,
+            InputControlPoint = 25, OutputControlPoint = 26, InputPatchConstant = 27, InputDomainPoint = 28, UnorderedAccessView = 30,
+            InputCoverageMask = 35, OutputDepthGreaterEqual = 38, OutputDepthLessEqual = 39;
     }
 
     public sealed record OperandIndex(long Value, Operand? Relative);
@@ -156,7 +165,11 @@ public static class T7DxbcCode
             int operands = opcode switch
             {
                 Op.DclTemps or Op.DclIndexableTemp or Op.DclGlobalFlags or Op.DclGsOutputTopology or Op.DclGsInputPrimitive
-                    or Op.DclMaxOutputVertexCount or Op.DclThreadGroup or Op.DclFunctionBody or Op.DclFunctionTable or Op.DclInterface => 0,
+                    or Op.DclMaxOutputVertexCount or Op.DclThreadGroup or Op.DclFunctionBody or Op.DclFunctionTable or Op.DclInterface
+                    or Op.HsDecls or Op.HsControlPointPhase or Op.HsForkPhase or Op.HsJoinPhase or Op.DclInputControlPointCount
+                    or Op.DclOutputControlPointCount or Op.DclTessDomain or Op.DclTessPartitioning or Op.DclTessOutputPrimitive
+                    or Op.DclHsMaxTessFactor or Op.DclHsForkPhaseInstanceCount or Op.DclHsJoinPhaseInstanceCount
+                    or Op.DclGsInstanceCount => 0,
                 Op.DclResource or Op.DclConstantBuffer or Op.DclSampler or Op.DclIndexRange or Op.DclInput or Op.DclInputSgv
                     or Op.DclInputSiv or Op.DclInputPs or Op.DclInputPsSgv or Op.DclInputPsSiv or Op.DclOutput or Op.DclOutputSgv
                     or Op.DclOutputSiv or Op.DclUavTyped or Op.DclUavRaw or Op.DclUavStructured or Op.DclTgsmRaw
@@ -240,6 +253,8 @@ public static class T7DxbcCode
     [
         "r", "v", "o", "x", "l", "d", "s", "t", "cb", "icb", "label", "vPrim", "oDepth", "null", "rasterizer", "oMask", "m", "fb", "ft",
         "fp", "fi", "fo", "vOutputControlPointID", "vForkInstanceID", "vJoinInstanceID", "vicp", "vocp", "vpc", "vDomain", "this", "u",
+        "g", "vThreadID", "vThreadGroupID", "vThreadIDInGroup", "vCoverage", "vThreadIDInGroupFlattened", "vGSInstanceID",
+        "oDepthGE", "oDepthLE", "vCycleCounter", "oStencilRef", "vInnerCoverage",
     ];
 
     public static string Disassemble(Program program)

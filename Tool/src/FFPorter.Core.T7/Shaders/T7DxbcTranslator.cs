@@ -10,7 +10,14 @@ public static class T7DxbcTranslator
 
     public const string VertexVersion = "t7-dxbc-6";
 
-    public static string VersionOf(string stage) => stage == "vs" ? VertexVersion : Version;
+    public const string TessellationVersion = "t7-tess-1";
+
+    public static string VersionOf(string stage) => stage switch
+    {
+        "vs" => VertexVersion,
+        "ls" or "hs" or "ds" => TessellationVersion,
+        _ => Version,
+    };
 
     private const uint UnitVectorScale = 0x40002010, UnitVectorBias = 0xBF804020;
 
@@ -18,11 +25,34 @@ public static class T7DxbcTranslator
 
     public sealed record Result(string Text, IReadOnlyList<string> Globals);
 
-    public static Result Translate(ReadOnlySpan<byte> dxbc, string stage, IReadOnlyDictionary<int, int>? textureRemap, IReadOnlyDictionary<int, int>? samplerRemap,
-        IReadOnlySet<int>? absentTextures = null, IReadOnlySet<string>? keptGlobals = null, T7PassTargets? targets = null)
+    public sealed record Link(int ControlRegisters, int PatchRegisters = 0, int ControlPoints = 0)
     {
-        var translator = new Translator(dxbc, stage, textureRemap, samplerRemap, absentTextures, keptGlobals, targets);
+        public string Key => $"{ControlRegisters},{PatchRegisters},{ControlPoints}";
+    }
+
+    public static Result Translate(ReadOnlySpan<byte> dxbc, string stage, IReadOnlyDictionary<int, int>? textureRemap, IReadOnlyDictionary<int, int>? samplerRemap,
+        IReadOnlySet<int>? absentTextures = null, IReadOnlySet<string>? keptGlobals = null, T7PassTargets? targets = null, Link? link = null)
+    {
+        var translator = new Translator(dxbc, stage, textureRemap, samplerRemap, absentTextures, keptGlobals, targets, link);
         return translator.Run();
+    }
+
+    public static string StageOf(ReadOnlySpan<byte> dxbc, bool tessellated = false) => Parse(dxbc).Stage switch
+    {
+        0 => "ps",
+        1 => tessellated ? "ls" : "vs",
+        3 => "hs",
+        4 => "ds",
+        var other => throw new NotSupportedException($"program type {other} is not converted"),
+    };
+
+    public static int Registers(IReadOnlyList<T7Dxbc.SignatureElement>? elements) =>
+        elements is { Count: > 0 } ? elements.Max(e => e.Register) + 1 : 0;
+
+    public static Link LinkFrom(ReadOnlySpan<byte> producer)
+    {
+        Instruction? points = Parse(producer).Instructions.FirstOrDefault(i => i.Opcode == Op.DclOutputControlPointCount);
+        return new Link(Registers(T7Dxbc.OutputSignature(producer)), Registers(T7Dxbc.PatchSignature(producer)), points == null ? 0 : points.Control & 0x3F);
     }
 
     public static bool WritesGbuffer(ReadOnlySpan<byte> dxbc) =>
@@ -47,7 +77,8 @@ public static class T7DxbcTranslator
         private readonly IReadOnlySet<int> _absentTextures;
         private readonly IReadOnlyList<T7Dxbc.Resource> _resources;
         private readonly IReadOnlyList<T7Dxbc.ConstantBuffer> _buffers;
-        private readonly IReadOnlyList<T7Dxbc.SignatureElement> _inputs, _outputs;
+        private readonly IReadOnlyList<T7Dxbc.SignatureElement> _inputs, _outputs, _patch;
+        private readonly Link? _link;
 
         private readonly StringBuilder _code = new();
         private int _indent = 1, _unique;
@@ -64,6 +95,15 @@ public static class T7DxbcTranslator
         private readonly SortedSet<int> _inputRegisters = [], _outputRegisters = [], _writtenOutputs = [];
         private bool _discards, _writesDepth, _writesCoverage;
 
+        private bool _patchPhase, _usesPrimitive, _readsOutputPatch, _readsCoverage;
+        private int _inputControlPoints, _outputControlPoints, _domain = 2, _partitioning = 1, _outputPrimitive = 3;
+        private float _maxTessFactor = 64.0f;
+        private readonly int _controlRegisters, _outputControlRegisters, _patchRegisters;
+
+        private bool VertexInputs => _stage is "vs" or "ls";
+        private bool VertexOutputs => _stage is "vs" or "ds";
+        private bool Tessellation => _stage is "hs" or "ds";
+
         private readonly T7PassTargets _targets;
 
         private readonly int _globalsSlot = -1, _globalsRows;
@@ -72,12 +112,12 @@ public static class T7DxbcTranslator
         private readonly int _oitMaxEntriesSlot = -1, _oitMaxEntriesOffset = -1;
 
         public Translator(ReadOnlySpan<byte> dxbc, string stage, IReadOnlyDictionary<int, int>? textureRemap, IReadOnlyDictionary<int, int>? samplerRemap,
-            IReadOnlySet<int>? absentTextures, IReadOnlySet<string>? keptGlobals, T7PassTargets? targets)
+            IReadOnlySet<int>? absentTextures, IReadOnlySet<string>? keptGlobals, T7PassTargets? targets, Link? link = null)
         {
             _program = Parse(dxbc);
             _stage = stage;
             _targets = stage == "ps" ? targets ?? T7PassTargets.Plain : T7PassTargets.Plain;
-            if ((stage, _program.Stage) is not (("ps", 0) or ("vs", 1)))
+            if ((stage, _program.Stage) is not (("ps", 0) or ("vs", 1) or ("ls", 1) or ("hs", 3) or ("ds", 4)))
                 throw new NotSupportedException($"a {stage} program was expected, the bytecode is program type {_program.Stage}");
             _textureRemap = textureRemap;
             _samplerRemap = samplerRemap;
@@ -86,11 +126,24 @@ public static class T7DxbcTranslator
             _buffers = T7Dxbc.ConstantBuffers(dxbc) ?? [];
             _inputs = T7Dxbc.InputSignature(dxbc) ?? [];
             _outputs = T7Dxbc.OutputSignature(dxbc) ?? [];
+            _patch = T7Dxbc.PatchSignature(dxbc) ?? [];
+            _link = link;
+            if (Tessellation)
+            {
+                int own = Registers(_inputs), patch = Registers(_patch);
+                _controlRegisters = Math.Max(1, link?.ControlRegisters ?? own);
+                _outputControlRegisters = Math.Max(1, Registers(_outputs));
+                _patchRegisters = Math.Max(1, stage == "ds" && link != null ? link.PatchRegisters : patch);
+                if (own > _controlRegisters)
+                    throw new NotSupportedException($"the {stage} program reads {own} control point registers, the stage before it writes {_controlRegisters}");
+                if (patch > _patchRegisters)
+                    throw new NotSupportedException($"the {stage} program reads {patch} patch constant registers, the hull program writes {_patchRegisters}");
+            }
             if (_resources.FirstOrDefault(r => r.Type == 0 && r.Name == "$Globals") is { } globals
                 && _buffers.FirstOrDefault(b => b.Name == "$Globals") is { } reflected)
             {
                 _globalsSlot = globals.Bind;
-                (_globalsLayout, int end) = T7GlobalsLayout.Of(reflected.Variables, keptGlobals, stage);
+                (_globalsLayout, int end) = T7GlobalsLayout.Of(stage is "ls" or "hs" ? [] : reflected.Variables, keptGlobals, stage);
                 _globalsRows = (end + 15) / 16;
             }
             if (_resources.FirstOrDefault(r => r.Type == 0 && r.Name == "LightingGlobals") is { } lighting
@@ -103,6 +156,8 @@ public static class T7DxbcTranslator
 
         public Result Run()
         {
+            if (_stage == "hs")
+                return RunHull();
             IReadOnlyList<Instruction> instructions = _program.Instructions;
             for (int i = 0; i < instructions.Count; i++)
             {
@@ -172,6 +227,28 @@ public static class T7DxbcTranslator
                         _interpolation.Add((operands[0].Register, operands[0].Mask, instruction.Control & 0xF));
                     return true;
                 case Op.DclInput or Op.DclInputSgv or Op.DclInputSiv or Op.DclOutput or Op.DclOutputSgv or Op.DclOutputSiv or Op.Nop:
+                    return true;
+                case Op.DclInputControlPointCount:
+                    _inputControlPoints = instruction.Control & 0x3F;
+                    return true;
+                case Op.DclOutputControlPointCount:
+                    _outputControlPoints = instruction.Control & 0x3F;
+                    return true;
+                case Op.DclTessDomain:
+                    _domain = instruction.Control & 3;
+                    return true;
+                case Op.DclTessPartitioning:
+                    _partitioning = instruction.Control & 7;
+                    return true;
+                case Op.DclTessOutputPrimitive:
+                    _outputPrimitive = instruction.Control & 7;
+                    return true;
+                case Op.DclHsMaxTessFactor:
+                    _maxTessFactor = BitConverter.Int32BitsToSingle(unchecked((int)instruction.Extra[0]));
+                    return true;
+                case Op.HsDecls:
+                    return true;
+                case Op.DclIndexRange when Tessellation:
                     return true;
                 case Op.DclIndexRange or Op.DclThreadGroup or Op.DclGsInputPrimitive or Op.DclGsOutputTopology or Op.DclMaxOutputVertexCount
                     or Op.DclFunctionBody or Op.DclFunctionTable or Op.DclInterface or Op.DclTgsmRaw or Op.DclTgsmStructured:
@@ -278,7 +355,7 @@ public static class T7DxbcTranslator
             var registers = new SortedDictionary<int, Kind>();
             foreach (T7Dxbc.SignatureElement element in elements)
             {
-                if (SystemValue(element) != 0 || element.Register < 0)
+                if (!IsVarying(element) || element.Register < 0)
                     continue;
                 Kind kind = SignatureKind(element.ComponentType);
                 registers[element.Register] = registers.TryGetValue(element.Register, out Kind existing) && existing != Kind.Float ? existing : kind;
@@ -308,14 +385,21 @@ public static class T7DxbcTranslator
                     copies.Add($"v{r} = {Convert($"in_r{r}", kind, Kind.Int, 4)};");
                 }
             }
-            for (int i = 0; i < _inputs.Count; i++)
+            if (_stage == "ds")
+                DomainInputs(text, parameters, copies);
+            if (_readsCoverage)
+            {
+                parameters.Add("uint coverage : S_COVERAGE");
+                copies.Add("int vCoverage = (int)(coverage);");
+            }
+            for (int i = 0; _stage != "ds" && i < _inputs.Count; i++)
             {
                 T7Dxbc.SignatureElement element = _inputs[i];
                 string name = $"in{i}";
                 int[] components = MaskBits(element.Mask);
                 int width = components.Length;
                 string register = element.Register >= 0 ? $"v{element.Register}.{Swizzle(components)}" : "";
-                if (_stage == "ps" && SystemValue(element) == 0)
+                if (_stage == "ps" && IsVarying(element))
                     continue;
                 if (element.Register >= 0)
                     inputRegisters.Add(element.Register);
@@ -334,6 +418,8 @@ public static class T7DxbcTranslator
                         parameters.Add($"uint {name} : {system}");
                         copies.Add($"{register} = (int)({name});");
                         continue;
+                    case 66 when _stage == "ps":
+                        continue;
                     case 0:
                         break;
                     default:
@@ -341,7 +427,7 @@ public static class T7DxbcTranslator
                 }
                 Kind kind = SignatureKind(element.ComponentType);
                 string type = TypeName(kind, width);
-                if (_stage == "vs" && kind == Kind.Uint && width == 1 && element.Semantic.Equals("TEXCOORD", StringComparison.OrdinalIgnoreCase) && element.Index == 15)
+                if (VertexInputs && kind == Kind.Uint && width == 1 && element.Semantic.Equals("TEXCOORD", StringComparison.OrdinalIgnoreCase) && element.Index == 15)
                 {
                     parameters.Add($"uint {name} : S_INSTANCE_ID");
                     copies.Add($"{register} = (int)({name});");
@@ -362,7 +448,9 @@ public static class T7DxbcTranslator
 
             SortedSet<int> outputRegisters = _outputRegisters;
             var writes = new List<string>();
-            if (_stage == "vs")
+            if (_stage == "ls")
+                LocalOutputs(parameters, writes, outputRegisters);
+            if (VertexOutputs)
             {
                 SortedDictionary<int, Kind> varyings = Varyings(_outputs);
                 int last = varyings.Count == 0 ? -1 : varyings.Keys.Max();
@@ -380,7 +468,7 @@ public static class T7DxbcTranslator
             }
             bool gbuffer = WritesPs4Gbuffer;
             bool hasTarget3 = _outputs.Any(e => IsTarget(e, 3));
-            for (int i = 0; i < _outputs.Count; i++)
+            for (int i = 0; _stage != "ls" && i < _outputs.Count; i++)
             {
                 T7Dxbc.SignatureElement element = _outputs[i];
                 string name = $"out{i}";
@@ -422,7 +510,22 @@ public static class T7DxbcTranslator
                         _writesCoverage = true;
                         writes.Add($"{name} = (uint)(oMask);");
                         break;
-                    case 0 when _stage == "vs":
+                    case 2 or 3 when VertexOutputs:
+                        parameters.Add($"out {TypeName(Kind.Float, width)} {name} : {(SystemValue(element) == 2 ? "S_CLIP_DISTANCE" : "S_CULL_DISTANCE")}{element.Index}");
+                        outputRegisters.Add(element.Register);
+                        writes.Add($"{name} = asfloat({register});");
+                        break;
+                    case 4 when VertexOutputs:
+                        parameters.Add($"out uint {name} : S_RENDER_TARGET_INDEX");
+                        outputRegisters.Add(element.Register);
+                        writes.Add($"{name} = (uint)({register});");
+                        break;
+                    case 67 or 68 when _stage == "ps":
+                        parameters.Add($"out float {name} : {(SystemValue(element) == 67 ? "S_DEPTH_GE_OUTPUT" : "S_DEPTH_LE_OUTPUT")}");
+                        _writesDepth = true;
+                        writes.Add($"{name} = asfloat(oDepth);");
+                        break;
+                    case 0 when VertexOutputs:
                         break;
                     case 0:
                         parameters.Add($"out {TypeName(kind, width)} {name} : {element.Semantic.ToUpperInvariant()}{element.Index}");
@@ -436,6 +539,8 @@ public static class T7DxbcTranslator
 
             if (_stage == "ps" && (_globalFlags & 4) != 0 && !_discards && !_writesDepth)
                 text.Append("[FORCE_EARLY_DEPTH_STENCIL]\n");
+            if (_stage == "ds")
+                text.Append($"[DOMAIN_PATCH_TYPE(\"{DomainName}\")]\n");
             text.Append("void main(").Append(string.Join(",\n  ", parameters)).Append(")\n{\n");
             if (_temps > 0)
                 text.Append("  int4 ").Append(string.Join(", ", Enumerable.Range(0, _temps).Select(r => $"r{r} = 0"))).Append(";\n");
@@ -457,11 +562,247 @@ public static class T7DxbcTranslator
             text.Append("}\n");
         }
 
+        private string DomainName => _domain switch { 1 => "isoline", 3 => "quad", _ => "tri" };
+
+        private (int Edges, int Inside) TessFactors => _domain switch { 1 => (2, 0), 3 => (4, 2), _ => (3, 1) };
+
+        private static string PointStruct(string name, int registers)
+        {
+            var text = new StringBuilder($"struct {name}\n{{\n");
+            for (int r = 0; r < registers; r++)
+                text.Append($"  float4 r{r} : TEXCOORD{r};\n");
+            return text.Append("};\n\n").ToString();
+        }
+
+        private string PatchStruct()
+        {
+            (int edges, int inside) = TessFactors;
+            var text = new StringBuilder("struct T7PatchConstants\n{\n");
+            text.Append($"  float edges[{edges}] : S_EDGE_TESS_FACTOR;\n");
+            if (inside == 1)
+                text.Append("  float inside : S_INSIDE_TESS_FACTOR;\n");
+            else if (inside > 1)
+                text.Append($"  float inside[{inside}] : S_INSIDE_TESS_FACTOR;\n");
+            for (int r = 0; r < _patchRegisters; r++)
+                text.Append($"  float4 c{r} : TEXCOORD{r};\n");
+            return text.Append("};\n\n").ToString();
+        }
+
+        private static IEnumerable<string> PointCopies(string array, string patch, int points, int registers)
+        {
+            for (int p = 0; p < points; p++)
+            {
+                for (int r = 0; r < registers; r++)
+                    yield return $"{array}[{p * registers + r}] = asint({patch}[{p}].r{r});";
+            }
+        }
+
+        private string ControlIndex(Operand operand, int registers)
+        {
+            OperandIndex point = operand.Indices[0], register = operand.Indices[1];
+            if (point.Relative == null && register.Relative == null)
+                return (point.Value * registers + register.Value).ToString(CultureInfo.InvariantCulture);
+            return $"({Index(point)}) * {registers} + {Index(register)}";
+        }
+
+        private void DomainInputs(StringBuilder text, List<string> parameters, List<string> copies)
+        {
+            int points = Math.Max(1, _link is { ControlPoints: > 0 } ? _link.ControlPoints : _inputControlPoints);
+            text.Append(PointStruct("T7ControlPoint", _controlRegisters));
+            text.Append(PatchStruct());
+            parameters.Add("T7PatchConstants constants");
+            parameters.Add($"float{(_domain == 2 ? 3 : 2)} location : S_DOMAIN_LOCATION");
+            parameters.Add($"const OutputPatch<T7ControlPoint, {points}> patch");
+            if (_usesPrimitive)
+                parameters.Add("uint primitive : S_PRIMITIVE_ID");
+            copies.Add($"int4 icp[{points * _controlRegisters}];");
+            copies.AddRange(PointCopies("icp", "patch", points, _controlRegisters));
+            copies.Add($"int4 pc[{_patchRegisters}];");
+            for (int r = 0; r < _patchRegisters; r++)
+                copies.Add($"pc[{r}] = asint(constants.c{r});");
+            copies.Add(_domain == 2 ? "int4 vDomain = int4(asint(location), 0);" : "int4 vDomain = int4(asint(location), 0, 0);");
+            if (_usesPrimitive)
+                copies.Add("int vPrim = (int)(primitive);");
+        }
+
+        private void LocalOutputs(List<string> parameters, List<string> writes, SortedSet<int> outputRegisters)
+        {
+            int registers = Math.Max(1, Registers(_outputs));
+            for (int r = 0; r < registers; r++)
+            {
+                parameters.Add($"out float4 out_r{r} : TEXCOORD{r}");
+                if (_writtenOutputs.Contains(r))
+                {
+                    outputRegisters.Add(r);
+                    writes.Add($"out_r{r} = asfloat(o{r});");
+                }
+                else
+                {
+                    writes.Add($"out_r{r} = float4(0.0f, 0.0f, 0.0f, 0.0f);");
+                }
+            }
+        }
+
+        private sealed record Phase(string Name, int Instances, string Body);
+
+        private Result RunHull()
+        {
+            var global = new List<Instruction>();
+            var phases = new List<(int Kind, List<Instruction> Body)>();
+            foreach (Instruction instruction in _program.Instructions)
+            {
+                if (instruction.Opcode is Op.HsControlPointPhase or Op.HsForkPhase or Op.HsJoinPhase)
+                    phases.Add((instruction.Opcode, []));
+                else if (phases.Count == 0)
+                    global.Add(instruction);
+                else
+                    phases[^1].Body.Add(instruction);
+            }
+            foreach (Instruction instruction in global)
+            {
+                if (!Declaration(instruction))
+                    throw Unsupported(instruction);
+            }
+
+            string? control = null;
+            var functions = new List<Phase>();
+            int fork = 0, join = 0;
+            foreach ((int kind, List<Instruction> body) in phases)
+            {
+                _temps = 0;
+                _indexableTemps.Clear();
+                _code.Clear();
+                _indent = 1;
+                _outputRegisters.Clear();
+                _patchPhase = kind != Op.HsControlPointPhase;
+                int instances = 1;
+                for (int i = 0; i < body.Count; i++)
+                {
+                    Instruction instruction = body[i];
+                    if (instruction.Opcode is Op.DclHsForkPhaseInstanceCount or Op.DclHsJoinPhaseInstanceCount)
+                    {
+                        instances = (int)instruction.Extra[0];
+                        continue;
+                    }
+                    if (Declaration(instruction))
+                        continue;
+                    Statement(instruction, i + 1 < body.Count ? body[i + 1] : null);
+                }
+                var locals = new StringBuilder();
+                if (_temps > 0)
+                    locals.Append("  int4 ").Append(string.Join(", ", Enumerable.Range(0, _temps).Select(r => $"r{r} = 0"))).Append(";\n");
+                foreach ((int register, (int size, _)) in _indexableTemps)
+                    locals.Append($"  int4 x{register}[{size}];\n");
+                if (_patchPhase)
+                {
+                    string name = kind == Op.HsForkPhase ? $"t7_fork{fork++}" : $"t7_join{join++}";
+                    functions.Add(new Phase(name, Math.Max(1, instances), locals + _code.ToString().Replace("\u0001RETURN\u0001 ", "")));
+                    continue;
+                }
+                if (_outputRegisters.Count > 0)
+                    locals.Append("  int4 ").Append(string.Join(", ", _outputRegisters.Select(r => $"o{r} = 0"))).Append(";\n");
+                string writes = string.Join(" ", Enumerable.Range(0, _outputControlRegisters).Select(r => _outputRegisters.Contains(r)
+                    ? $"result.r{r} = asfloat(o{r});" : $"result.r{r} = float4(0.0f, 0.0f, 0.0f, 0.0f);"));
+                control = locals + _code.ToString().Replace("\u0001RETURN\u0001 return;", writes + " return result;");
+            }
+            _patchPhase = false;
+
+            int pointsIn = Math.Max(1, _inputControlPoints), pointsOut = Math.Max(1, _outputControlPoints);
+            int inputs = pointsIn * _controlRegisters, outputs = pointsOut * _outputControlRegisters;
+            var text = new StringBuilder();
+            text.Append("// ").Append(VersionOf(_stage)).Append(": translated from the PC shader model ").Append(_program.Major).Append('.').Append(_program.Minor).Append(" bytecode\n\n");
+            Declarations(text);
+            foreach (string helper in _helpers)
+                text.Append(Helpers[helper]).Append('\n');
+            text.Append(PointStruct("T7PointIn", _controlRegisters));
+            text.Append(PointStruct("T7PointOut", _outputControlRegisters));
+            text.Append(PatchStruct());
+
+            foreach (Phase phase in functions)
+            {
+                text.Append($"void {phase.Name}(int vForkInstanceID, int vJoinInstanceID, int vPrim, in int4 icp[{inputs}], in int4 ocp[{outputs}], inout int4 pc[{_patchRegisters}])\n{{\n");
+                text.Append(phase.Body).Append("}\n\n");
+            }
+
+            var patchParameters = new List<string> { $"InputPatch<T7PointIn, {pointsIn}> ip" };
+            if (_readsOutputPatch)
+                patchParameters.Add($"const OutputPatch<T7PointOut, {pointsOut}> op");
+            if (_usesPrimitive)
+                patchParameters.Add("uint primitive : S_PRIMITIVE_ID");
+            text.Append($"T7PatchConstants t7_patch({string.Join(", ", patchParameters)})\n{{\n");
+            text.Append($"  int4 icp[{inputs}];\n  int4 ocp[{outputs}];\n  int4 pc[{_patchRegisters}];\n");
+            text.Append($"  int vPrim = {(_usesPrimitive ? "(int)(primitive)" : "0")};\n");
+            foreach (string copy in PointCopies("icp", "ip", pointsIn, _controlRegisters))
+                text.Append("  ").Append(copy).Append('\n');
+            if (_readsOutputPatch)
+            {
+                foreach (string copy in PointCopies("ocp", "op", pointsOut, _outputControlRegisters))
+                    text.Append("  ").Append(copy).Append('\n');
+            }
+            else
+            {
+                for (int i = 0; i < outputs; i++)
+                    text.Append($"  ocp[{i}] = 0;\n");
+            }
+            for (int r = 0; r < _patchRegisters; r++)
+                text.Append($"  pc[{r}] = 0;\n");
+            for (int i = 0; i < functions.Count; i++)
+            {
+                Phase phase = functions[i];
+                text.Append(phase.Instances > 1
+                    ? $"  for (int k{i} = 0; k{i} < {phase.Instances}; k{i}++)\n    {phase.Name}(k{i}, k{i}, vPrim, icp, ocp, pc);\n"
+                    : $"  {phase.Name}(0, 0, vPrim, icp, ocp, pc);\n");
+            }
+            text.Append("  T7PatchConstants result;\n");
+            (int edges, int inside) = TessFactors;
+            for (int i = 0; i < edges; i++)
+                text.Append($"  result.edges[{i}] = {TessFactor(false, i)};\n");
+            for (int i = 0; i < inside; i++)
+                text.Append($"  result.inside{(inside == 1 ? "" : $"[{i}]")} = {TessFactor(true, i)};\n");
+            for (int r = 0; r < _patchRegisters; r++)
+                text.Append($"  result.c{r} = asfloat(pc[{r}]);\n");
+            text.Append("  return result;\n}\n\n");
+
+            string partitioning = _partitioning switch { 2 => "pow2", 3 => "fractional_odd", 4 => "fractional_even", _ => "integer" };
+            string topology = _outputPrimitive switch { 1 => "point", 2 => "line", 4 => "triangle_ccw", _ => "triangle_cw" };
+            text.Append($"[DOMAIN_PATCH_TYPE(\"{DomainName}\")]\n[PARTITIONING_TYPE(\"{partitioning}\")]\n[OUTPUT_TOPOLOGY_TYPE(\"{topology}\")]\n");
+            text.Append($"[OUTPUT_CONTROL_POINTS({pointsOut})]\n[PATCH_CONSTANT_FUNC(\"t7_patch\")]\n[MAX_TESS_FACTOR({Literal(BitConverter.SingleToUInt32Bits(_maxTessFactor), Kind.Float).TrimEnd('f')})]\n");
+            var mainParameters = new List<string> { $"InputPatch<T7PointIn, {pointsIn}> ip", "uint control : S_OUTPUT_CONTROL_POINT_ID" };
+            if (_usesPrimitive)
+                mainParameters.Add("uint primitive : S_PRIMITIVE_ID");
+            text.Append($"T7PointOut main({string.Join(", ", mainParameters)})\n{{\n  T7PointOut result;\n");
+            if (control == null)
+            {
+                for (int r = 0; r < _outputControlRegisters; r++)
+                    text.Append(r < _controlRegisters ? $"  result.r{r} = ip[control].r{r};\n" : $"  result.r{r} = float4(0.0f, 0.0f, 0.0f, 0.0f);\n");
+                text.Append("  return result;\n");
+            }
+            else
+            {
+                text.Append($"  int4 icp[{inputs}];\n");
+                foreach (string copy in PointCopies("icp", "ip", pointsIn, _controlRegisters))
+                    text.Append("  ").Append(copy).Append('\n');
+                text.Append($"  int vOutputControlPointID = (int)(control);\n  int vPrim = {(_usesPrimitive ? "(int)(primitive)" : "0")};\n");
+                text.Append(control);
+            }
+            text.Append("}\n");
+            return new Result(text.ToString(), _globalsLayout.Select(entry => entry.Variable.Name).ToList());
+        }
+
+        private string TessFactor(bool inside, int index)
+        {
+            T7Dxbc.SignatureElement? element = _patch.FirstOrDefault(e => e.Index == index && e.Register >= 0 && (inside
+                ? e.Semantic.Equals("SV_InsideTessFactor", StringComparison.OrdinalIgnoreCase) || e.SystemValue is 12 or 14
+                : e.Semantic.Equals("SV_TessFactor", StringComparison.OrdinalIgnoreCase) || e.SystemValue is 11 or 13 or 15 or 16));
+            int[] components = element == null ? [] : MaskBits(element.Mask);
+            return components.Length == 0 ? "1.0f" : $"asfloat(pc[{element!.Register}].{Xyzw[components[0]]})";
+        }
+
         private Dictionary<int, (int Xyz, bool W)> PackedUnitVectorInputs()
         {
             var xyz = new Dictionary<int, int>();
             var w = new HashSet<int>();
-            if (_stage != "vs")
+            if (!VertexInputs)
                 return [];
             foreach (Instruction instruction in _program.Instructions)
             {
@@ -492,6 +833,9 @@ public static class T7DxbcTranslator
             return name switch
             {
                 "SV_POSITION" => 1,
+                "SV_CLIPDISTANCE" => 2,
+                "SV_CULLDISTANCE" => 3,
+                "SV_RENDERTARGETARRAYINDEX" => 4,
                 "SV_VERTEXID" => 6,
                 "SV_PRIMITIVEID" => 7,
                 "SV_INSTANCEID" => 8,
@@ -500,10 +844,14 @@ public static class T7DxbcTranslator
                 "SV_TARGET" => 64,
                 "SV_DEPTH" => 65,
                 "SV_COVERAGE" => 66,
+                "SV_DEPTHGREATEREQUAL" => 67,
+                "SV_DEPTHLESSEQUAL" => 68,
                 _ when name.StartsWith("SV_", StringComparison.Ordinal) => -1,
                 _ => 0,
             };
         }
+
+        private static bool IsVarying(T7Dxbc.SignatureElement element) => SystemValue(element) is 0 or 2 or 3;
 
         private string InterpolationModifier(int register, Kind kind)
         {
@@ -655,10 +1003,27 @@ public static class T7DxbcTranslator
                     TwoResults(instruction, Kind.Uint, [(d, s) => $"{s[0]} / {s[1]}", (d, s) => $"{s[0]} % {s[1]}"], 2);
                     break;
                 case Op.IMul or Op.UMul:
+                {
+                    Kind kind = instruction.Opcode == Op.IMul ? Kind.Int : Kind.Uint;
+                    string high = kind == Kind.Int ? "__mul_his" : "__mul_hi";
                     if (o[0].Type != OperandType.Null)
-                        throw new NotSupportedException($"the high half of {instruction.Name} is not translated");
-                    TwoResults(instruction, instruction.Opcode == Op.IMul ? Kind.Int : Kind.Uint, [(d, s) => "", (d, s) => $"{s[0]} * {s[1]}"], 2);
+                    {
+                        _helpers.Add("__mul_hi");
+                        _helpers.Add(high);
+                    }
+                    TwoResults(instruction, kind, [(d, s) => Each(d.Length, kind, c => $"{high}(({s[0]}){c}, ({s[1]}){c})"), (d, s) => $"{s[0]} * {s[1]}"], 2);
                     break;
+                }
+                case Op.UAddC or Op.USubB:
+                {
+                    bool add = instruction.Opcode == Op.UAddC;
+                    TwoResults(instruction, Kind.Uint,
+                    [
+                        (d, s) => add ? $"{s[0]} + {s[1]}" : $"{s[0]} - {s[1]}",
+                        (d, s) => add ? $"({TypeName(Kind.Uint, d.Length)})(({s[0]} + {s[1]}) < {s[0]})" : $"({TypeName(Kind.Uint, d.Length)})({s[0]} < {s[1]})",
+                    ], 2);
+                    break;
+                }
 
                 case Op.If:
                     Emit($"if ({LoadFirst(o[0], 1, Kind.Int)} {(instruction.TestNonZero ? "!=" : "==")} 0) {{");
@@ -751,6 +1116,8 @@ public static class T7DxbcTranslator
                         2 => $"t{slot}.GetDimensions({mip}, {w}, {l});",
                         3 or 6 or 7 => $"t{slot}.GetDimensions({mip}, {w}, {h}, {l});",
                         5 or 8 or 10 => $"t{slot}.GetDimensions({mip}, {w}, {h}, {d}, {l});",
+                        4 => $"t{slot}.GetDimensions({w}, {h}, {l}); {l} = 1u;",
+                        9 => $"t{slot}.GetDimensions({w}, {h}, {d}, {l}); {l} = 1u;",
                         _ => throw new NotSupportedException($"resinfo on resource dimension {info.Dimension}"),
                     });
                     string value = returnType switch
@@ -828,10 +1195,174 @@ public static class T7DxbcTranslator
                     Emit("}");
                     break;
                 }
+                case Op.Gather4 or Op.Gather4C or Op.Gather4Po or Op.Gather4PoC:
+                    Gather(instruction);
+                    break;
+                case Op.F32toF16: PerComponent(instruction, "__f32tof16", 1); break;
+                case Op.BfRev: PerComponent(instruction, "__bfrev", 1); break;
+                case Op.BufInfo:
+                {
+                    Operand buffer = o[1];
+                    bool unordered = buffer.Type == OperandType.UnorderedAccessView;
+                    ResourceInfo info = (unordered ? _uavs.GetValueOrDefault(buffer.Register)
+                        : buffer.Type == OperandType.Resource ? _textures.GetValueOrDefault(buffer.Register) : null) ?? throw Unsupported(instruction);
+                    if (info.Dimension is not (1 or 11 or 12))
+                        throw new NotSupportedException($"{instruction.Name} on resource dimension {info.Dimension}");
+                    if (AbsentRead(o[0], buffer, Kind.Uint, saturate))
+                        break;
+                    string name = $"{(unordered ? "u" : "t")}{buffer.Register}";
+                    Emit("{");
+                    _indent++;
+                    string count = Unique(), stride = Unique();
+                    Emit($"uint {count} = 0u, {stride} = 0u;");
+                    Emit(info.Dimension == 12 ? $"{name}.GetDimensions({count}, {stride});" : $"{name}.GetDimensions({count});");
+                    Store(o[0], Replicate(count, Kind.Uint, MaskComponents(o[0]).Length), Kind.Uint, saturate);
+                    _indent--;
+                    Emit("}");
+                    break;
+                }
+                case Op.SampleInfo:
+                {
+                    (int slot, ResourceInfo info) = Texture(o[1]);
+                    bool asUint = (instruction.Control & 1) != 0;
+                    if (AbsentRead(o[0], o[1], asUint ? Kind.Uint : Kind.Float, saturate))
+                        break;
+                    Emit("{");
+                    _indent++;
+                    string w = Unique(), h = Unique(), e = Unique(), n = Unique();
+                    Emit($"uint {w} = 0u, {h} = 0u, {e} = 0u, {n} = 0u;");
+                    Emit(info.Dimension switch
+                    {
+                        4 => $"t{slot}.GetDimensions({w}, {h}, {n});",
+                        9 => $"t{slot}.GetDimensions({w}, {h}, {e}, {n});",
+                        _ => throw new NotSupportedException($"{instruction.Name} on resource dimension {info.Dimension}"),
+                    });
+                    string value = asUint ? $"uint4({n}, 0u, 0u, 0u)" : $"float4((float)({n}), 0.0f, 0.0f, 0.0f)";
+                    Store(o[0], Pick(value, o[1], MaskComponents(o[0])), asUint ? Kind.Uint : Kind.Float, saturate);
+                    _indent--;
+                    Emit("}");
+                    break;
+                }
+                case Op.SamplePos:
+                {
+                    (int slot, ResourceInfo info) = Texture(o[1]);
+                    if (info.Dimension is not (4 or 9))
+                        throw new NotSupportedException($"{instruction.Name} on resource dimension {info.Dimension}");
+                    if (AbsentRead(o[0], o[1], Kind.Float, saturate))
+                        break;
+                    string value = $"float4(t{slot}.GetSamplePoint({LoadFirst(o[2], 1, Kind.Int)}), 0.0f, 0.0f)";
+                    Store(o[0], Pick(value, o[1], MaskComponents(o[0])), Kind.Float, saturate);
+                    break;
+                }
+                case Op.StoreStructured:
+                {
+                    ResourceInfo? info = o[0].Type == OperandType.UnorderedAccessView ? _uavs.GetValueOrDefault(o[0].Register) : null;
+                    if (info is not { Dimension: 12 })
+                        throw Unsupported(instruction);
+                    string element = $"u{o[0].Register}[{LoadFirst(o[1], 1, Kind.Uint)}]";
+                    foreach (int c in MaskComponents(o[0]))
+                    {
+                        string word = o[2].Type == OperandType.Immediate32
+                            ? $"{element}.d[{o[2].Values[0] / 4 + c}]"
+                            : $"{element}.d[({LoadFirst(o[2], 1, Kind.Uint)} >> 2u) + {c}u]";
+                        Emit($"{word} = {LoadComponents(o[3], [o[3].Swizzle[c]], Kind.Int)};");
+                    }
+                    break;
+                }
+                case Op.AtomicAnd or Op.AtomicOr or Op.AtomicXor or Op.AtomicCmpStore or Op.AtomicIAdd or Op.AtomicIMax or Op.AtomicIMin
+                    or Op.AtomicUMax or Op.AtomicUMin or Op.ImmAtomicAnd or Op.ImmAtomicOr or Op.ImmAtomicXor or Op.ImmAtomicExch
+                    or Op.ImmAtomicCmpExch or Op.ImmAtomicIMax or Op.ImmAtomicIMin or Op.ImmAtomicUMax or Op.ImmAtomicUMin:
+                    Atomic(instruction);
+                    break;
+                case Op.ImmAtomicAlloc or Op.ImmAtomicConsume:
+                {
+                    ResourceInfo? info = o[1].Type == OperandType.UnorderedAccessView ? _uavs.GetValueOrDefault(o[1].Register) : null;
+                    if (info is not { Dimension: 12 })
+                        throw Unsupported(instruction);
+                    Store(o[0], $"u{o[1].Register}.{(instruction.Opcode == Op.ImmAtomicAlloc ? "IncrementCount" : "DecrementCount")}()", Kind.Uint);
+                    break;
+                }
+                case Op.EvalCentroid or Op.EvalSampleIndex or Op.EvalSnapped:
+                {
+                    if (_stage != "ps" || o[1].Type != OperandType.Input || o[1].Register < 0)
+                        throw Unsupported(instruction);
+                    string attribute = $"in_r{o[1].Register}";
+                    string call = instruction.Opcode switch
+                    {
+                        Op.EvalCentroid => $"EvaluateAttributeAtCentroid({attribute})",
+                        Op.EvalSampleIndex => $"EvaluateAttributeAtSample({attribute}, {LoadFirst(o[2], 1, Kind.Uint)})",
+                        _ => $"EvaluateAttributeSnapped({attribute}, {LoadFirst(o[2], 2, Kind.Int)})",
+                    };
+                    Store(o[0], $"({call}).{Swizzle(Sources(o[1], MaskComponents(o[0])))}", Kind.Float, saturate);
+                    break;
+                }
                 default:
                     throw Unsupported(instruction);
             }
         }
+
+        private void Gather(Instruction instruction)
+        {
+            List<Operand> o = instruction.Operands;
+            bool programmable = instruction.Opcode is Op.Gather4Po or Op.Gather4PoC;
+            bool comparison = instruction.Opcode is Op.Gather4C or Op.Gather4PoC;
+            int at = programmable ? 3 : 2;
+            Operand resource = o[at], sampler = o[at + 1];
+            (int slot, ResourceInfo info) = Texture(resource);
+            Kind kind = comparison ? Kind.Float : info.Kind;
+            if (AbsentRead(o[0], resource, kind, instruction.Saturate))
+                return;
+            string coordinates = LoadFirst(o[1], CoordinateCount(info.Dimension, instruction), Kind.Float);
+            string offset = programmable ? $", {LoadFirst(o[2], 2, Kind.Int)}" : Offset(instruction, info.Dimension);
+            string channel = sampler.Components == 4 ? sampler.Swizzle[0] switch { 0 => "Red", 1 => "Green", 2 => "Blue", _ => "Alpha" } : "Red";
+            string call = comparison
+                ? $"t{slot}.GatherCmp(s{sampler.Register}, {coordinates}, {LoadFirst(o[at + 2], 1, Kind.Float)}{offset})"
+                : $"t{slot}.Gather{channel}(s{sampler.Register}, {coordinates}{offset})";
+            Store(o[0], Pick(call, resource, MaskComponents(o[0])), kind, instruction.Saturate);
+        }
+
+        private void Atomic(Instruction instruction)
+        {
+            List<Operand> o = instruction.Operands;
+            bool immediate = instruction.Opcode >= Op.ImmAtomicIAdd;
+            int at = immediate ? 1 : 0;
+            ResourceInfo info = _uavs.GetValueOrDefault(o[at].Register) ?? throw Unsupported(instruction);
+            if (info.Dimension is 11 or 12)
+                throw new NotSupportedException($"{instruction.Name} on a structured or raw buffer is not translated");
+            Kind kind = info.Kind == Kind.Int ? Kind.Int : Kind.Uint;
+            string target = $"u{o[at].Register}[{LoadFirst(o[at + 1], AddressCount(info.Dimension, instruction), Kind.Uint)}]{(info.Components > 1 ? ".x" : "")}";
+            string function = instruction.Opcode switch
+            {
+                Op.AtomicAnd or Op.ImmAtomicAnd => "AtomicAnd",
+                Op.AtomicOr or Op.ImmAtomicOr => "AtomicOr",
+                Op.AtomicXor or Op.ImmAtomicXor => "AtomicXor",
+                Op.AtomicIAdd => "AtomicAdd",
+                Op.AtomicIMax or Op.AtomicUMax or Op.ImmAtomicIMax or Op.ImmAtomicUMax => "AtomicMax",
+                Op.AtomicIMin or Op.AtomicUMin or Op.ImmAtomicIMin or Op.ImmAtomicUMin => "AtomicMin",
+                Op.ImmAtomicExch => "AtomicExchange",
+                Op.AtomicCmpStore => "AtomicCmpStore",
+                _ => "AtomicCmpExchange",
+            };
+            string arguments = instruction.Opcode is Op.AtomicCmpStore or Op.ImmAtomicCmpExch
+                ? $"{LoadFirst(o[at + 2], 1, kind)}, {LoadFirst(o[at + 3], 1, kind)}"
+                : LoadFirst(o[at + 2], 1, kind);
+            if (!immediate)
+            {
+                Emit($"{function}({target}, {arguments});");
+                return;
+            }
+            Emit("{");
+            _indent++;
+            string original = Unique();
+            Emit($"{TypeName(kind, 1)} {original};");
+            Emit($"{function}({target}, {arguments}, {original});");
+            Store(o[0], original, kind);
+            _indent--;
+            Emit("}");
+        }
+
+        private static string Each(int count, Kind kind, Func<string, string> format) =>
+            count == 1 ? format("") : $"{TypeName(kind, count)}({string.Join(", ", Enumerable.Range(0, count).Select(c => format("." + Xyzw[c])))})";
 
         private bool IsOitCounter(int register) =>
             _resources.Any(r => r.IsUnorderedAccess && r.Bind == register && r.Name.Equals("gOit_Pixels", StringComparison.OrdinalIgnoreCase));
@@ -1113,9 +1644,35 @@ public static class T7DxbcTranslator
                 case OperandType.Input when operand.Indices.Length == 1 && operand.Register >= 0:
                     _inputRegisters.Add(operand.Register);
                     return ($"v{operand.Register}", Kind.Int, false);
+                case OperandType.Output when _patchPhase && operand.Indices.Length == 1:
+                    return ($"pc[{Index(operand.Indices[0])}]", Kind.Int, false);
                 case OperandType.Output when operand.Register >= 0:
                     _outputRegisters.Add(operand.Register);
                     return ($"o{operand.Register}", Kind.Int, false);
+                case OperandType.Input or OperandType.InputControlPoint when Tessellation && operand.Indices.Length == 2:
+                    return ($"icp[{ControlIndex(operand, _controlRegisters)}]", Kind.Int, false);
+                case OperandType.OutputControlPoint when _stage == "hs" && operand.Indices.Length == 2:
+                    _readsOutputPatch = true;
+                    return ($"ocp[{ControlIndex(operand, _outputControlRegisters)}]", Kind.Int, false);
+                case OperandType.InputPatchConstant when Tessellation && operand.Indices.Length == 1:
+                    return ($"pc[{Index(operand.Indices[0])}]", Kind.Int, false);
+                case OperandType.InputDomainPoint when _stage == "ds":
+                    return ("vDomain", Kind.Int, false);
+                case OperandType.OutputControlPointId when _stage == "hs":
+                    return ("vOutputControlPointID", Kind.Int, true);
+                case OperandType.ForkInstanceId when _stage == "hs":
+                    return ("vForkInstanceID", Kind.Int, true);
+                case OperandType.JoinInstanceId when _stage == "hs":
+                    return ("vJoinInstanceID", Kind.Int, true);
+                case OperandType.InputPrimitiveId when Tessellation:
+                    _usesPrimitive = true;
+                    return ("vPrim", Kind.Int, true);
+                case OperandType.InputCoverageMask when _stage == "ps":
+                    _readsCoverage = true;
+                    return ("vCoverage", Kind.Int, true);
+                case OperandType.OutputDepthGreaterEqual or OperandType.OutputDepthLessEqual when _stage == "ps":
+                    _writesDepth = true;
+                    return ("oDepth", Kind.Int, true);
                 case OperandType.IndexableTemp:
                     return ($"x{operand.Register}[{Index(operand.Indices[1])}]", Kind.Int, false);
                 case OperandType.ConstantBuffer when operand.Indices.Length == 2:
@@ -1276,6 +1833,47 @@ public static class T7DxbcTranslator
               float b = t - 0.5f * co;
               float r = b + co;
               return float4(float3(r, g, b) * alpha, pc.z);
+            }
+
+            """,
+        ["__f32tof16"] = """
+            int __f32tof16(int value)
+            {
+              return (int)f32tof16(asfloat(value));
+            }
+
+            """,
+        ["__bfrev"] = """
+            int __bfrev(int value)
+            {
+              uint v = (uint)value;
+              v = ((v >> 1u) & 0x55555555u) | ((v & 0x55555555u) << 1u);
+              v = ((v >> 2u) & 0x33333333u) | ((v & 0x33333333u) << 2u);
+              v = ((v >> 4u) & 0x0F0F0F0Fu) | ((v & 0x0F0F0F0Fu) << 4u);
+              v = ((v >> 8u) & 0x00FF00FFu) | ((v & 0x00FF00FFu) << 8u);
+              return (int)((v >> 16u) | (v << 16u));
+            }
+
+            """,
+        ["__mul_hi"] = """
+            uint __mul_hi(uint a, uint b)
+            {
+              uint al = a & 0xFFFFu, ah = a >> 16u, bl = b & 0xFFFFu, bh = b >> 16u;
+              uint lh = al * bh, hl = ah * bl;
+              uint middle = ((al * bl) >> 16u) + (lh & 0xFFFFu) + (hl & 0xFFFFu);
+              return ah * bh + (lh >> 16u) + (hl >> 16u) + (middle >> 16u);
+            }
+
+            """,
+        ["__mul_his"] = """
+            int __mul_his(int a, int b)
+            {
+              uint high = __mul_hi((uint)a, (uint)b);
+              if (a < 0)
+                high -= (uint)b;
+              if (b < 0)
+                high -= (uint)a;
+              return (int)high;
             }
 
             """,

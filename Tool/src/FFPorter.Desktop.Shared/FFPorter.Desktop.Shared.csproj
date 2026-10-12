@@ -9,4 +9,7 @@
   <ItemGroup>
     <ProjectReference Include="../FFPorter.Core/FFPorter.Core.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Resource Include="Theme\app.ico" />
+  </ItemGroup>
 </Project>

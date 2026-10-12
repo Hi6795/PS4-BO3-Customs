@@ -8,6 +8,10 @@ public sealed class T7ShaderCompiler
 {
     public const string RulesVersion = "t7-pssl-4";
 
+    private const int VertexAttributeLimit = 16;
+
+    private const string InstanceIdFetch = "1";
+
     private static readonly TimeSpan ToolTimeout = TimeSpan.FromSeconds(180);
 
     public sealed record Program(byte[] Header, byte[] Code, IReadOnlyList<string> Globals);
@@ -49,8 +53,11 @@ public sealed class T7ShaderCompiler
         {
             if (File.Exists(hlsl))
                 return File.ReadAllText(hlsl);
+            using IDisposable shared = CacheFiles.Lock(folder);
+            if (File.Exists(hlsl))
+                return File.ReadAllText(hlsl);
             string source = Path.Combine(folder, "source.dxbc");
-            File.WriteAllBytes(source, dxbc.ToArray());
+            CacheFiles.WriteAllBytes(source, dxbc.ToArray());
             (int exit, string output) = Run(_decompiler, ["-D", "-V", source], folder);
             if (exit != 0 || !File.Exists(Path.Combine(folder, "source.hlsl")))
                 (exit, output) = Run(_decompiler, ["-D", source], folder);
@@ -67,10 +74,12 @@ public sealed class T7ShaderCompiler
     }
 
     public Program Compile(string stage, ReadOnlySpan<byte> dxbc, IReadOnlyDictionary<int, int>? textureRemap, IReadOnlyDictionary<int, int>? samplerRemap,
-        IReadOnlySet<int>? absentTextures = null, IReadOnlySet<string>? keptGlobals = null, T7PassTargets? targets = null)
+        IReadOnlySet<int>? absentTextures = null, IReadOnlySet<string>? keptGlobals = null, T7PassTargets? targets = null, T7DxbcTranslator.Link? link = null,
+        bool perInstance = false)
     {
         targets = stage == "ps" ? targets ?? T7PassTargets.Plain : T7PassTargets.Plain;
-        string variant = Variant(stage, textureRemap, samplerRemap, absentTextures, keptGlobals, targets);
+        perInstance &= stage == "vs";
+        string variant = Variant(stage, textureRemap, samplerRemap, absentTextures, keptGlobals, targets, link, perInstance);
         string folder = Path.Combine(ProgramFolder(dxbc), variant);
         string headerPath = Path.Combine(folder, "gnmx_header.bin"), codePath = Path.Combine(folder, "gpu_code.bin"), globalsPath = Path.Combine(folder, "globals.txt");
         lock (_gate)
@@ -88,12 +97,16 @@ public sealed class T7ShaderCompiler
         {
             string original = Path.Combine(programFolder, "source.dxbc");
             if (!File.Exists(original))
-                File.WriteAllBytes(original, dxbc.ToArray());
+                CacheFiles.WriteAllBytes(original, dxbc.ToArray());
         }
         try
         {
-            T7DxbcTranslator.Result translated = T7DxbcTranslator.Translate(dxbc, stage, textureRemap, samplerRemap, absentTextures, keptGlobals, targets);
+            T7DxbcTranslator.Result translated = T7DxbcTranslator.Translate(dxbc, stage, textureRemap, samplerRemap, absentTextures, keptGlobals, targets, link);
             (text, globals) = (translated.Text, translated.Globals);
+        }
+        catch (NotSupportedException unsupported) when (stage is "ls" or "hs" or "ds")
+        {
+            throw new InvalidDataException($"shader {Path.GetFileName(programFolder)}: {unsupported.Message}");
         }
         catch (NotSupportedException unsupported) when (absentTextures is { Count: > 0 })
         {
@@ -118,6 +131,7 @@ public sealed class T7ShaderCompiler
         }
         lock (_variantGates.GetOrAdd(folder, _ => new object()))
         {
+            using IDisposable shared = CacheFiles.Lock(folder);
             if (File.Exists(headerPath) && File.Exists(codePath) && File.Exists(globalsPath))
             {
                 lock (_gate)
@@ -132,10 +146,18 @@ public sealed class T7ShaderCompiler
             {
                 "vs" => ["-profile", "sce_vs_vs_orbis", "-indirect-draw", "-inlinefetchshader", "-max-user-extdata-count", "240"],
                 "ps" => ["-profile", "sce_ps_orbis", "-max-user-extdata-count", "240"],
+                "ls" => ["-profile", "sce_vs_ls_orbis", "-indirect-draw", "-inlinefetchshader", "-max-user-extdata-count", "240"],
+                "hs" => ["-profile", "sce_hs_orbis", "-max-user-extdata-count", "240"],
+                "ds" => ["-profile", "sce_ds_vs_orbis", "-max-user-extdata-count", "240"],
                 _ => throw new InvalidDataException($"{stage} shaders are not converted"),
             };
             if (targets.MrtFormat != T7PassTargets.DefaultMrtFormat)
                 arguments.AddRange(["-mrtformat", $"0x{targets.MrtFormat:x8}"]);
+            if (perInstance)
+            {
+                for (int attribute = 0; attribute < VertexAttributeLimit; attribute++)
+                    arguments.AddRange([$"-attr-inst-mode-{attribute}", InstanceIdFetch]);
+            }
             arguments.AddRange(["-o", binary, source]);
             (int exit, string output) = Run(_compiler, arguments, folder);
             File.WriteAllText(Path.Combine(folder, "compile.log"), output);
@@ -146,9 +168,9 @@ public sealed class T7ShaderCompiler
                 throw new InvalidDataException($"PSSL compile of a {stage} program failed ({folder}): {errors}");
             }
             (byte[] header, byte[] code) = T7GnmSdk.SplitShaderBinary(File.ReadAllBytes(binary));
-            File.WriteAllBytes(headerPath, header);
-            File.WriteAllBytes(codePath, code);
-            File.WriteAllLines(globalsPath, globals);
+            CacheFiles.WriteAllBytes(headerPath, header);
+            CacheFiles.WriteAllBytes(codePath, code);
+            CacheFiles.WriteAllLines(globalsPath, globals);
             lock (_gate)
                 Compiled++;
             return new Program(header, code, globals);
@@ -158,10 +180,12 @@ public sealed class T7ShaderCompiler
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, object> _variantGates = new(StringComparer.OrdinalIgnoreCase);
 
     public string CacheFolder(string stage, ReadOnlySpan<byte> dxbc, IReadOnlyDictionary<int, int>? textureRemap, IReadOnlyDictionary<int, int>? samplerRemap,
-        IReadOnlySet<int>? absentTextures = null, IReadOnlySet<string>? keptGlobals = null, T7PassTargets? targets = null)
+        IReadOnlySet<int>? absentTextures = null, IReadOnlySet<string>? keptGlobals = null, T7PassTargets? targets = null, T7DxbcTranslator.Link? link = null,
+        bool perInstance = false)
     {
         targets = stage == "ps" ? targets ?? T7PassTargets.Plain : T7PassTargets.Plain;
-        return Path.Combine(_cache, Convert.ToHexStringLower(SHA256.HashData(dxbc))[..24], Variant(stage, textureRemap, samplerRemap, absentTextures, keptGlobals, targets));
+        return Path.Combine(_cache, Convert.ToHexStringLower(SHA256.HashData(dxbc))[..24],
+            Variant(stage, textureRemap, samplerRemap, absentTextures, keptGlobals, targets, link, perInstance && stage == "vs"));
     }
 
     public static bool IsCompiled(string folder) =>
@@ -178,7 +202,7 @@ public sealed class T7ShaderCompiler
     }
 
     private static string Variant(string stage, IReadOnlyDictionary<int, int>? textures, IReadOnlyDictionary<int, int>? samplers, IReadOnlySet<int>? absent,
-        IReadOnlySet<string>? keptGlobals, T7PassTargets targets)
+        IReadOnlySet<string>? keptGlobals, T7PassTargets targets, T7DxbcTranslator.Link? link, bool perInstance = false)
     {
         var text = new StringBuilder(RulesVersion).Append('|').Append(T7DxbcTranslator.VersionOf(stage)).Append('|').Append(stage);
         foreach ((string label, IReadOnlyDictionary<int, int>? map) in (ReadOnlySpan<(string, IReadOnlyDictionary<int, int>?)>)[("t", textures), ("s", samplers)])
@@ -193,6 +217,10 @@ public sealed class T7ShaderCompiler
         if (keptGlobals is { Count: > 0 })
             text.Append("|k").Append(string.Join(",", keptGlobals.Order(StringComparer.Ordinal)));
         text.Append(targets.Key);
+        if (link != null)
+            text.Append("|l").Append(link.Key);
+        if (perInstance)
+            text.Append("|i").Append(InstanceIdFetch);
         return stage + "_" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text.ToString())))[..16];
     }
 

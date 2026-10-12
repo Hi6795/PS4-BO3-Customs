@@ -119,14 +119,23 @@ public static class NativeProcess
         return new NativeProcessResult(code, Text(stdout), Text(stderr), clock.Elapsed, attempt, !exited);
     }
 
+    private const int WaitSlice = 250;
+
     private static bool Wait(Process process, NativeProcessOptions options)
     {
-        using var stop = CancellationTokenSource.CreateLinkedTokenSource(options.Cancellation);
         if (options.Timeout is TimeSpan timeout)
-            stop.CancelAfter(timeout);
+        {
+            var active = Tools.ActiveClock.StartNew();
+            while (!process.WaitForExit(WaitSlice))
+            {
+                if (options.Cancellation.IsCancellationRequested || active.Elapsed >= timeout)
+                    return process.HasExited;
+            }
+            return true;
+        }
         try
         {
-            process.WaitForExitAsync(stop.Token).GetAwaiter().GetResult();
+            process.WaitForExitAsync(options.Cancellation).GetAwaiter().GetResult();
             return true;
         }
         catch (OperationCanceledException)

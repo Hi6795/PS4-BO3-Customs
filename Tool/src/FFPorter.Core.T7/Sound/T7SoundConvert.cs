@@ -199,9 +199,9 @@ public static class T7SoundConvert
         retimed = loopLength != frames;
         short[] loop = loopLength == frames ? pcm : ResamplePeriodic(pcm, channels, loopLength, periodic: true);
         var feed = new short[(576 + loopLength + 2304) * channels];
-        loop.AsSpan((loopLength - 576) * channels, 576 * channels).CopyTo(feed);
+        CopyPeriodic(loop, channels, loopLength, loopLength - 576, 576, feed);
         loop.AsSpan(0, loopLength * channels).CopyTo(feed.AsSpan(576 * channels));
-        loop.AsSpan(0, 2304 * channels).CopyTo(feed.AsSpan((576 + loopLength) * channels));
+        CopyPeriodic(loop, channels, loopLength, 0, 2304, feed.AsSpan((576 + loopLength) * channels));
         byte[] encoded = lame.Encode(feed, channels, OutputRate);
         List<(int Offset, int Length)> mp3Frames = Mp3Frames(encoded);
         if (mp3Frames.Count < loopFrames + 2)
@@ -209,6 +209,12 @@ public static class T7SoundConvert
         int start = mp3Frames[1].Offset;
         int end = mp3Frames[loopFrames + 1].Offset;
         return encoded.AsSpan(start, end - start).ToArray();
+    }
+
+    private static void CopyPeriodic(ReadOnlySpan<short> loop, int channels, int loopLength, int start, int count, Span<short> target)
+    {
+        for (int frame = 0; frame < count; frame++)
+            loop.Slice((start + frame) % loopLength * channels, channels).CopyTo(target.Slice(frame * channels, channels));
     }
 
     private static (short[] Pcm, int Channels, int Rate) DecodeFlac(byte[] flac, Workspace workspace, SndFile sndfile)

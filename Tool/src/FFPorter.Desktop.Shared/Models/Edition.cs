@@ -15,7 +15,11 @@ public abstract class Edition
 
     public abstract string Title { get; }
 
+    public virtual string Product => Title.Split(" — ", 2)[0];
+
     public abstract string Subtitle { get; }
+
+    public virtual string? Author => null;
 
     public abstract string GameName { get; }
 
@@ -35,7 +39,35 @@ public abstract class Edition
     {
     }
 
+    public virtual string? CommunityList => null;
+
+    public virtual string? UpdateSource => null;
+
+    public virtual string? ConsoleArchive => null;
+
+    public virtual string? ConsolePlugin => null;
+
+    public bool HasConsoleFiles => UpdateSource != null && ConsoleArchive != null && ConsolePlugin != null;
+
+    public virtual bool FindsInstalled => false;
+
+    public virtual IReadOnlyList<Installed> FindInstalled(string? gameFolder) => [];
+
+    public virtual string? ConsoleFolder(Job job) => null;
+
+    public virtual string? ConsoleFolder(string name, bool mod) => null;
+
+    public virtual bool IsConverted(string zone) => true;
+
     public virtual IReadOnlyList<string> CacheFolders() => [];
+
+    public virtual string? CacheFolder(Job job) => null;
+
+    public virtual bool IsGameFolder(string folder) => false;
+
+    public virtual Originals? FindOriginals(Job job) => null;
+
+    public virtual double? EstimateSeconds(Job job, bool sideBySide) => null;
 
     public abstract bool Accepts(string file, out string? why);
 

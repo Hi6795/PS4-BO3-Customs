@@ -43,11 +43,14 @@ public sealed class FidelityTracker
     private readonly Part[] _parts = FidelityScale.Dimensions.Select(_ => new Part()).ToArray();
     private readonly List<StepState> _steps = [];
     private readonly Action<FidelitySnapshot>? _emit;
-    private readonly Stopwatch _clock = Stopwatch.StartNew();
+    private readonly Tools.ActiveClock _clock = Tools.ActiveClock.StartNew();
     private readonly List<string> _problems = [];
+    private readonly HashSet<string> _placed = new(StringComparer.Ordinal);
+    private readonly object _gate = new();
     private long _lastEmit = long.MinValue / 2;
     private string _stage = "", _detail = "", _state = FidelityStates.Running, _headline = "";
     private double _progress;
+    private double? _remaining;
     private int _order;
 
     public FidelityTracker(string game, string map, Action<FidelitySnapshot>? emit)
@@ -64,107 +67,172 @@ public sealed class FidelityTracker
 
     public TimeSpan Interval { get; set; } = TimeSpan.FromMilliseconds(250);
 
-    public string State => _state;
+    public bool Overlap { get; set; }
 
-    public IReadOnlyList<string> Problems => _problems;
+    public string State
+    {
+        get
+        {
+            lock (_gate)
+                return _state;
+        }
+    }
+
+    public IReadOnlyList<string> Problems
+    {
+        get
+        {
+            lock (_gate)
+                return [.. _problems];
+        }
+    }
 
     public void Add(FidelityDimension dimension, FidelityGrade grade, long count = 1)
     {
         if (count <= 0)
             return;
-        Part part = _parts[(int)dimension];
-        part.Units[(int)grade] += count;
-        part.Changed = true;
-        Tick();
+        lock (_gate)
+        {
+            Part part = _parts[(int)dimension];
+            part.Units[(int)grade] += count;
+            part.Changed = true;
+            Tick();
+        }
     }
 
     public void Downgrade(FidelityDimension dimension, FidelityGrade grade, long count = 1)
     {
         if (count <= 0 || grade == FidelityGrade.Exact)
             return;
-        Part part = _parts[(int)dimension];
-        long moved = Math.Min(count, part.Units[(int)FidelityGrade.Exact]);
-        part.Units[(int)FidelityGrade.Exact] -= moved;
-        part.Units[(int)grade] += count;
-        part.Changed = true;
-        Tick();
+        lock (_gate)
+        {
+            Part part = _parts[(int)dimension];
+            long moved = Math.Min(count, part.Units[(int)FidelityGrade.Exact]);
+            part.Units[(int)FidelityGrade.Exact] -= moved;
+            part.Units[(int)grade] += count;
+            part.Changed = true;
+            Tick();
+        }
     }
 
     public void Content(FidelityDimension dimension, string singular, string plural, long count = 1)
     {
         if (count <= 0)
             return;
-        Part part = _parts[(int)dimension];
-        part.Contents[plural] = part.Contents.TryGetValue(plural, out var existing)
-            ? (singular, plural, existing.Count + count, existing.Order)
-            : (singular, plural, count, _order++);
+        lock (_gate)
+        {
+            Part part = _parts[(int)dimension];
+            part.Contents[plural] = part.Contents.TryGetValue(plural, out var existing)
+                ? (singular, plural, existing.Count + count, existing.Order)
+                : (singular, plural, count, _order++);
+        }
     }
 
     public void Note(FidelityDimension dimension, string key, FidelityGrade? grade, long count, Func<long, string?, string> text, string? sample = null)
     {
         if (count <= 0)
             return;
-        Part part = _parts[(int)dimension];
-        if (!part.Notes.TryGetValue(key, out NoteState? note))
-            part.Notes[key] = note = new NoteState { Grade = grade, Text = text, Order = _order++ };
-        note.Count += count;
-        note.Sample ??= sample;
-        part.Changed = true;
+        lock (_gate)
+        {
+            Part part = _parts[(int)dimension];
+            if (!part.Notes.TryGetValue(key, out NoteState? note))
+                part.Notes[key] = note = new NoteState { Grade = grade, Text = text, Order = _order++ };
+            note.Count += count;
+            note.Sample ??= sample;
+            part.Changed = true;
+        }
     }
 
     public void AddStep(string key, string title)
     {
-        if (!_steps.Exists(s => s.Key == key))
-            _steps.Add(new StepState { Key = key, Title = title });
+        lock (_gate)
+        {
+            if (!_steps.Exists(s => s.Key == key))
+                _steps.Add(new StepState { Key = key, Title = title });
+        }
     }
 
     public void StartStep(string key, string detail = "")
     {
-        if (FindStep(key) is not { State: FidelityStepStates.Waiting } step)
-            return;
-        foreach (StepState running in _steps.Where(s => s.State == FidelityStepStates.Running))
-            EndStep(running, _state);
-        step.State = FidelityStepStates.Running;
-        step.Started = _clock.ElapsedMilliseconds;
-        step.Detail = detail;
-        Tick();
+        lock (_gate)
+        {
+            if (FindStep(key) is not { State: FidelityStepStates.Waiting } step)
+                return;
+            if (!Overlap)
+            {
+                foreach (StepState running in _steps.Where(s => s.State == FidelityStepStates.Running))
+                    EndStep(running, _state);
+            }
+            step.State = FidelityStepStates.Running;
+            step.Started = _clock.ElapsedMilliseconds;
+            step.Detail = detail;
+            Tick();
+        }
     }
 
     public void StepProgress(string key, double fraction, string? detail = null)
     {
-        if (FindStep(key) is not { State: FidelityStepStates.Running } step)
-            return;
-        step.Progress = Math.Clamp(Math.Max(step.Progress, fraction), 0, 1);
-        if (detail != null)
-            step.Detail = detail;
-        Tick();
+        lock (_gate)
+        {
+            if (FindStep(key) is not { State: FidelityStepStates.Running } step)
+                return;
+            step.Progress = Math.Clamp(Math.Max(step.Progress, fraction), 0, 1);
+            if (detail != null)
+                step.Detail = detail;
+            Tick();
+        }
     }
 
     public void FailStep(string key)
     {
-        if (FindStep(key) is { } step)
-            step.Failed = true;
+        lock (_gate)
+        {
+            if (FindStep(key) is { } step)
+                step.Failed = true;
+        }
     }
 
     public void SkipStep(string key)
     {
-        if (FindStep(key) is not { State: FidelityStepStates.Waiting } step)
-            return;
-        step.State = FidelityStepStates.Skipped;
-        Tick();
+        lock (_gate)
+        {
+            if (FindStep(key) is not { State: FidelityStepStates.Waiting } step)
+                return;
+            step.State = FidelityStepStates.Skipped;
+            Tick();
+        }
+    }
+
+    public void EndStep(string key)
+    {
+        lock (_gate)
+        {
+            if (FindStep(key) is not { } step)
+                return;
+            if (step.State == FidelityStepStates.Running)
+                EndStep(step, _state);
+            else if (step.State == FidelityStepStates.Waiting)
+                step.State = step.Failed ? FidelityStepStates.Failed : FidelityStepStates.Skipped;
+            else
+                return;
+            Tick();
+        }
     }
 
     public void PlaceNext(string key)
     {
-        int at = _steps.FindIndex(s => s.Key == key);
-        if (at < 0 || _steps[at].State != FidelityStepStates.Waiting)
-            return;
-        int target = _steps.FindLastIndex(s => s.State != FidelityStepStates.Waiting) + 1;
-        if (target >= at)
-            return;
-        StepState step = _steps[at];
-        _steps.RemoveAt(at);
-        _steps.Insert(target, step);
+        lock (_gate)
+        {
+            int at = _steps.FindIndex(s => s.Key == key);
+            if (at < 0 || _steps[at].State != FidelityStepStates.Waiting || !_placed.Add(key))
+                return;
+            int target = _steps.FindLastIndex(s => s.State != FidelityStepStates.Waiting || (s.Key != key && _placed.Contains(s.Key))) + 1;
+            if (target >= at)
+                return;
+            StepState step = _steps[at];
+            _steps.RemoveAt(at);
+            _steps.Insert(target, step);
+        }
     }
 
     private StepState? FindStep(string key) => _steps.Find(s => s.Key == key);
@@ -179,106 +247,140 @@ public sealed class FidelityTracker
 
     public void Problem(string text)
     {
-        if (_problems.Count < 200)
-            _problems.Add(text);
-        Tick();
+        lock (_gate)
+        {
+            if (_problems.Count < 200)
+                _problems.Add(text);
+            Tick();
+        }
     }
 
     public void Stage(string stage, string detail = "")
     {
-        _stage = stage;
-        _detail = detail;
-        Emit();
+        lock (_gate)
+        {
+            _stage = stage;
+            _detail = detail;
+            Emit();
+        }
     }
 
     public void Detail(string detail)
     {
-        _detail = detail;
-        Tick();
+        lock (_gate)
+        {
+            _detail = detail;
+            Tick();
+        }
     }
 
     public void Progress(double fraction)
     {
-        _progress = Math.Clamp(Math.Max(_progress, fraction), 0, 1);
-        Tick();
+        lock (_gate)
+        {
+            _progress = Math.Clamp(Math.Max(_progress, fraction), 0, 1);
+            Tick();
+        }
+    }
+
+    public void Remaining(double? seconds)
+    {
+        lock (_gate)
+            _remaining = seconds is double left && double.IsFinite(left) ? Math.Max(0, left) : null;
     }
 
     public FidelitySnapshot Finish(string state, string headline)
     {
-        _state = state;
-        _headline = headline;
-        if (state == FidelityStates.Done)
-            _progress = 1;
-        _stage = state switch { FidelityStates.Done => "Finished", FidelityStates.Cancelled => "Cancelled", _ => "Failed" };
-        _detail = "";
-        foreach (StepState step in _steps)
+        lock (_gate)
         {
-            if (step.State == FidelityStepStates.Running)
-                EndStep(step, state);
-            else if (step.State == FidelityStepStates.Waiting)
-                step.State = FidelityStepStates.Skipped;
+            _state = state;
+            _headline = headline;
+            if (state == FidelityStates.Done)
+                _progress = 1;
+            _stage = state switch { FidelityStates.Done => "Finished", FidelityStates.Cancelled => "Cancelled", _ => "Failed" };
+            _detail = "";
+            foreach (StepState step in _steps)
+            {
+                if (step.State == FidelityStepStates.Running)
+                    EndStep(step, state);
+                else if (step.State == FidelityStepStates.Waiting)
+                    step.State = FidelityStepStates.Skipped;
+            }
+            FidelitySnapshot snapshot = TakeSnapshot();
+            _emit?.Invoke(snapshot);
+            _lastEmit = _clock.ElapsedMilliseconds;
+            return snapshot;
         }
-        FidelitySnapshot snapshot = Snapshot();
-        _emit?.Invoke(snapshot);
-        _lastEmit = _clock.ElapsedMilliseconds;
-        return snapshot;
     }
 
     public (double? Score, FidelityGrade? Grade) Overall()
     {
-        double weighted = 0, weights = 0;
-        bool allExact = true;
-        foreach (FidelityDimension dimension in FidelityScale.Dimensions)
+        lock (_gate)
         {
-            Part part = _parts[(int)dimension];
-            if (part.Score is not double score)
-                continue;
-            weighted += score * FidelityScale.Weight(dimension);
-            weights += FidelityScale.Weight(dimension);
-            allExact &= part.AllExact;
+            double weighted = 0, weights = 0;
+            bool allExact = true;
+            foreach (FidelityDimension dimension in FidelityScale.Dimensions)
+            {
+                Part part = _parts[(int)dimension];
+                if (part.Score is not double score)
+                    continue;
+                weighted += score * FidelityScale.Weight(dimension);
+                weights += FidelityScale.Weight(dimension);
+                allExact &= part.AllExact;
+            }
+            if (weights == 0)
+                return (null, null);
+            double overall = weighted / weights;
+            return (overall, FidelityScale.GradeOf(overall, allExact));
         }
-        if (weights == 0)
-            return (null, null);
-        double overall = weighted / weights;
-        return (overall, FidelityScale.GradeOf(overall, allExact));
     }
 
     public string Headline(bool built, int problems)
     {
         if (!built)
             return problems == 0
-                ? "The conversion stopped before the PS4 fastfile was written."
-                : $"The PS4 fastfile was not written: {Count(problems, "problem", "problems")} stopped the conversion. The notes and the activity log say what to fix.";
+                ? "Stopped before the PS4 fastfile was written."
+                : $"Not written: {Count(problems, "problem", "problems")} stopped it. See the log.";
         if (problems > 0)
-            return $"The fastfile was written but failed its checks ({Count(problems, "problem", "problems")}), so it may not load. See the activity log.";
-        return Overall().Grade switch
+            return $"Written, but it failed its checks ({Count(problems, "problem", "problems")}) and may not load.";
+        (double? score, FidelityGrade? grade) = Overall();
+        return grade switch
         {
-            FidelityGrade.Exact => "Everything converted exactly and the fastfile passed the PS4 loader check. Verify in-game before treating it as done.",
-            FidelityGrade.Strong => $"The fastfile built cleanly and nearly all of the {Subject} came across; the notes list what was approximated. Verify in-game before treating it as done.",
-            FidelityGrade.Good => $"The fastfile built, but some of the {Subject} was approximated. Check the notes and test in-game.",
-            FidelityGrade.Approximate => $"The fastfile built, but much of the {Subject} was approximated or is missing. Expect visible problems in-game.",
-            FidelityGrade.Weak => $"The fastfile built, but most of the {Subject} did not come across faithfully. It is unlikely to look right in-game.",
-            _ => "The fastfile built, but nothing in it could be scored.",
+            FidelityGrade.Exact => "Everything converted exactly. Verify in-game.",
+            FidelityGrade.Strong when score >= FidelityScale.Full => "Everything came across in PS4 formats. Verify in-game.",
+            FidelityGrade.Strong => $"Nearly all of the {Subject} came across. Verify in-game.",
+            FidelityGrade.Good => $"Some of the {Subject} was approximated. Test in-game.",
+            FidelityGrade.Approximate => $"Much of the {Subject} was approximated or is missing.",
+            FidelityGrade.Weak => $"Most of the {Subject} did not come across faithfully.",
+            _ => "Built, but nothing in it could be scored.",
         };
     }
 
     public FidelitySnapshot Snapshot()
     {
+        lock (_gate)
+            return TakeSnapshot();
+    }
+
+    private FidelitySnapshot TakeSnapshot()
+    {
         (double? score, FidelityGrade? grade) = Overall();
+        List<StepState> running = Overlap && _state == FidelityStates.Running ? _steps.FindAll(s => s.State == FidelityStepStates.Running) : [];
         var snapshot = new FidelitySnapshot
         {
             Game = Game,
             Map = Map,
             State = _state,
-            Stage = _stage,
-            Detail = _detail,
+            Stage = running.Count > 1 ? $"{running.Count} steps at once" : _stage,
+            Detail = running.Count > 1 ? string.Join(" · ", running.Select(s => s.Title)) : _detail,
             Progress = _progress,
             Score = score is double s ? Math.Round(s, 2) : null,
             Percent = score is double p ? FidelityScale.Percent(p, grade == FidelityGrade.Exact) : null,
             Grade = grade is FidelityGrade g ? FidelityScale.Name(g) : null,
-            Headline = _state == FidelityStates.Running ? $"Converting. Scores fill in as each part of the {Subject} is converted." : _headline,
+            Headline = _state == FidelityStates.Running ? "Converting. Scores fill in as each part converts." : _headline,
             Problems = [.. _problems],
             ElapsedSeconds = Math.Round(_clock.Elapsed.TotalSeconds, 1),
+            RemainingSeconds = _state == FidelityStates.Running && _remaining is double left ? Math.Round(left, 1) : null,
             Steps = _steps.Select(s => new FidelityStepReport
             {
                 Key = s.Key,
@@ -317,16 +419,22 @@ public sealed class FidelityTracker
 
     public void Tick()
     {
-        if (_emit != null && _clock.ElapsedMilliseconds - _lastEmit >= Interval.TotalMilliseconds)
-            Emit();
+        lock (_gate)
+        {
+            if (_emit != null && _clock.ElapsedMilliseconds - _lastEmit >= Interval.TotalMilliseconds)
+                Emit();
+        }
     }
 
     public void Emit()
     {
         if (_emit == null)
             return;
-        _lastEmit = _clock.ElapsedMilliseconds;
-        _emit(Snapshot());
+        lock (_gate)
+        {
+            _lastEmit = _clock.ElapsedMilliseconds;
+            _emit(TakeSnapshot());
+        }
     }
 
     public static string Count(long count, string singular, string plural) =>

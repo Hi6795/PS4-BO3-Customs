@@ -66,6 +66,7 @@ constexpr uint8_t kOpData         = 84;
 constexpr uint8_t kOpGetFieldMM   = 96;
 constexpr uint8_t kOpGetGlobalMem = 99;
 
+static const char kLogFolder[] = "/data/BO3-Customs";
 static const char kLogPath[] = "/data/BO3-Customs/log.txt";
 
 static const uint8_t k_uiLuaError[] = { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
@@ -269,7 +270,9 @@ static void WriteV(const char* format, va_list args)
 
     size_t used = (size_t)stamp + ((size_t)body < room ? (size_t)body : room - 1);
     line[used++] = '\n';
+    line[used] = 0;
     Append(line, used);
+    DebugOut(line);
 }
 
 static const char* ReadableText(uintptr_t p)
@@ -1079,12 +1082,16 @@ void T7Log_Install(uintptr_t base)
     installed = true;
     g_base = base;
 
+    sceKernelMkdir(kLogFolder, 0777);
+
     const int fd = sceKernelOpen(kLogPath, SCE_KERNEL_O_WRONLY | SCE_KERNEL_O_CREAT | SCE_KERNEL_O_TRUNC, 0777);
 
     if (fd >= 0)
         sceKernelClose(fd);
 
     T7Log_Write("BO3-Customs debug log (Debug build of %s %s)", __DATE__, __TIME__);
+    T7Log_Write("[Log] running on a %s; lines also go to %s", IsPs5() ? "PS5" : "PS4",
+                DebugSink() ? DebugSink() : "this file only");
 
     const bool ui = Hook(kUiLuaError, k_uiLuaError, sizeof(k_uiLuaError), &g_uiErrorDetour, (void*)UiLuaError,
                          &g_uiErrorOriginal);

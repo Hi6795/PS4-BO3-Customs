@@ -71,7 +71,7 @@ public static class T7Paths
 
     public static string? FindGameZones(string zoneFile) => FindGameZones(zoneFile, out _);
 
-    private const string SteamFolder = "Call of Duty Black Ops III";
+    private const string SteamFolder = "Call of Duty Black Ops III", SteamApp = "311210";
 
     private static string RememberedPath => Path.Combine(Workspace.WorkDirectory, "t7", "game_zones.txt");
 
@@ -107,6 +107,35 @@ public static class T7Paths
 
     private static string? SteamGameZones()
     {
+        foreach (string library in SteamLibraries())
+        {
+            string zone = Path.Combine(library, "steamapps", "common", SteamFolder, "zone");
+            if (IsGameZones(zone))
+                return zone;
+        }
+        return null;
+    }
+
+    public static IReadOnlyList<string> ContentRoots(string? gameZones)
+    {
+        var games = new List<string>();
+        if (!string.IsNullOrWhiteSpace(gameZones))
+        {
+            string zone = Path.TrimEndingDirectorySeparator(gameZones.Trim());
+            games.Add(Path.GetFileName(zone).Equals("zone", StringComparison.OrdinalIgnoreCase) && Path.GetDirectoryName(zone) is { Length: > 0 } parent ? parent : zone);
+        }
+        var workshops = new List<string>();
+        foreach (string library in SteamLibraries())
+        {
+            games.Add(Path.Combine(library, "steamapps", "common", SteamFolder));
+            workshops.Add(Path.Combine(library, "steamapps", "workshop", "content", SteamApp));
+        }
+        return [.. games.SelectMany(game => (string[])[Path.Combine(game, "usermaps"), Path.Combine(game, "mods")]).Concat(workshops)
+            .Distinct(StringComparer.OrdinalIgnoreCase).Where(Directory.Exists)];
+    }
+
+    private static IReadOnlyList<string> SteamLibraries()
+    {
         var libraries = new List<string>();
         foreach ((string key, string value) in (ReadOnlySpan<(string, string)>)[
             (@"HKEY_CURRENT_USER\Software\Valve\Steam", "SteamPath"),
@@ -129,12 +158,6 @@ public static class T7Paths
             {
             }
         }
-        foreach (string library in libraries.Distinct(StringComparer.OrdinalIgnoreCase))
-        {
-            string zone = Path.Combine(library, "steamapps", "common", SteamFolder, "zone");
-            if (IsGameZones(zone))
-                return zone;
-        }
-        return null;
+        return [.. libraries.Distinct(StringComparer.OrdinalIgnoreCase)];
     }
 }

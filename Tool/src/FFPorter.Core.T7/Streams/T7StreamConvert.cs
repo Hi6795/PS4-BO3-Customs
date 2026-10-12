@@ -303,7 +303,8 @@ public sealed record T7StreamConvertResult(T7StreamMap Map, IReadOnlyDictionary<
 
 public static class T7StreamConvert
 {
-    public const string RulesVersion = "t7-streams-10";
+    public const string RulesVersion = "t7-streams-11";
+    public const string KeptSuffix = ", kept";
 
     public static T7StreamConvertResult Run(T7StreamConvertOptions options)
     {
@@ -474,8 +475,10 @@ public static class T7StreamConvert
                     if (warnings.Count < 5000)
                         warnings.Add($"{type} '{record?.Name ?? pcKey.ToString("x16")}' could not be converted ({error.Message}); it was copied unchanged");
                 }
-                if (record != null && ReferenceEquals(converted, parts))
-                    converted = SplitByRecord(parts, record);
+                if (ReferenceEquals(converted, parts))
+                    converted = record != null ? SplitByRecord(parts, record) : parts;
+                else if (type is not ("image" or "sanim") && source.StartsWith("zone transform", StringComparison.Ordinal) && SameBytes(parts, converted))
+                    source += KeptSuffix;
                 Count(bundledFrom == null ? $"{type}: {source}" : $"{type}: external, bundled ({source})");
                 int tag = (int)(pcKey >> 61);
                 byte[] payload = Concat(converted);
@@ -682,6 +685,13 @@ public static class T7StreamConvert
             at += size;
         }
         return split;
+    }
+
+    private static bool SameBytes(List<(uint LogicalOffset, byte[] Bytes)> stored, List<(uint LogicalOffset, byte[] Bytes)> converted)
+    {
+        if (stored.Count == 0 || stored.Sum(p => (long)p.Bytes.Length) != converted.Sum(p => (long)p.Bytes.Length))
+            return false;
+        return Concat(stored).AsSpan().SequenceEqual(Concat(converted));
     }
 
     private static byte[] Concat(List<(uint LogicalOffset, byte[] Bytes)> parts)

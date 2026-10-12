@@ -8,8 +8,33 @@ namespace FFPorter.Desktop.Services;
 public sealed class BackendProcess
 {
     private Process? _process;
+    private ProcessTree.Hold? _hold;
 
     public bool IsRunning => _process != null;
+
+    public bool IsPaused => _hold != null;
+
+    public bool Pause()
+    {
+        if (_hold != null || _process is not { } process)
+            return _hold != null;
+        try
+        {
+            if (process.HasExited)
+                return false;
+            _hold = ProcessTree.Suspend(process.Id);
+        }
+        catch (InvalidOperationException)
+        {
+        }
+        return _hold != null;
+    }
+
+    public void Resume()
+    {
+        _hold?.Dispose();
+        _hold = null;
+    }
 
     public async Task<int> RunAsync(IEnumerable<string> arguments, string workingDirectory, Action<string> onOutput, Action<string> onError,
         IReadOnlyDictionary<string, string>? environment = null)
@@ -41,6 +66,7 @@ public sealed class BackendProcess
         }
         finally
         {
+            Resume();
             _process = null;
         }
     }
@@ -51,6 +77,7 @@ public sealed class BackendProcess
         {
             if (_process is { HasExited: false } process)
                 process.Kill(entireProcessTree: true);
+            Resume();
         }
         catch (InvalidOperationException)
         {

@@ -4,6 +4,8 @@ namespace FFPorter.Core.Common.Tools;
 
 public static class ProcessRunner
 {
+    private const int WaitSlice = 250;
+
     public sealed record Result(int ExitCode, string Output, bool TimedOut);
 
     public static Result Run(string tool, IEnumerable<string> arguments, string workingDirectory, TimeSpan timeout)
@@ -23,7 +25,11 @@ public static class ProcessRunner
         process.StandardInput.Close();
         Task<string> output = process.StandardOutput.ReadToEndAsync();
         Task<string> errors = process.StandardError.ReadToEndAsync();
-        if (!process.WaitForExit(timeout))
+        var active = ActiveClock.StartNew();
+        bool exited = process.WaitForExit(WaitSlice);
+        while (!exited && active.Elapsed < timeout)
+            exited = process.WaitForExit(WaitSlice);
+        if (!exited)
         {
             try
             {

@@ -52,6 +52,8 @@ public static class T7Dxbc
 
     public static IReadOnlyList<SignatureElement>? OutputSignature(ReadOnlySpan<byte> dxbc) => Signature(dxbc, "OSGN"u8, "OSG1"u8);
 
+    public static IReadOnlyList<SignatureElement>? PatchSignature(ReadOnlySpan<byte> dxbc) => Signature(dxbc, "PCSG"u8, "PSG1"u8);
+
     private static IReadOnlyList<SignatureElement>? Signature(ReadOnlySpan<byte> dxbc, ReadOnlySpan<byte> tag, ReadOnlySpan<byte> extendedTag)
     {
         bool extended = false;

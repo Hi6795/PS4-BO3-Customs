@@ -18,7 +18,10 @@ using Hook_t = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, ui
 uint64_t Frame_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
                  double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
 {
+    T7Maps_FrameWork();
+    T7Share_Tick();
     T7Lua_Tick();
+    T7Builtins_Tick();
 
     return ((Hook_t)g_frameOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
 }
@@ -92,6 +95,11 @@ static void* start_thread(void*)
     T7MapImages_Install(base);
     T7Lua_Install(base);
     T7Kbm_Install(base);
+    T7Builtins_Install(base);
+
+    if (T7Maps_MapCount() >= 0)
+        T7Share_Install(base);
+
     T7Log_Write("[Maps] %d custom map(s) found", T7Maps_MapCount());
 
     if (RangeReadable(base + kComFrame, sizeof(k_comFrame)) &&
@@ -105,7 +113,10 @@ static void* start_thread(void*)
     else
     {
         char buff[256];
-        snprintf(buff, sizeof(buff), "BO3 Customs Mod loaded!\nCreated by ItsJokerZz.\nFound %d custom map(s)", T7Maps_MapCount());
+        if (T7Maps_ModCount() > 0)
+            snprintf(buff, sizeof(buff), "BO3 Customs Mod loaded!\nCreated by ItsJokerZz.\nFound %d custom map(s) and %d mod(s)", T7Maps_MapCount(), T7Maps_ModCount());
+        else
+            snprintf(buff, sizeof(buff), "BO3 Customs Mod loaded!\nCreated by ItsJokerZz.\nFound %d custom map(s)", T7Maps_MapCount());
         Notify(buff);
     }
 

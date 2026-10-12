@@ -57,13 +57,14 @@ public static class T7FastFileDelta
         string patched = Path.Combine(folder, Path.GetFileName(fastFile));
         if (File.Exists(patched))
             return patched;
+        using IDisposable shared = Core.Common.Tools.CacheFiles.Lock(patched);
+        if (File.Exists(patched))
+            return patched;
         log?.Invoke($"applying {Path.GetFileName(delta)} to {Path.GetFileName(fastFile)}");
         T7FastFile.Decoded decoded = T7FastFile.Load(fastFile);
         (T7Header header, byte[] zone) = Apply(decoded.Zone, File.ReadAllBytes(delta));
         Directory.CreateDirectory(folder);
-        string temporary = patched + ".tmp";
-        File.WriteAllBytes(temporary, T7FastFile.Encode(header, zone, CompressionLevel.Fastest));
-        File.Move(temporary, patched, overwrite: true);
+        Core.Common.Tools.CacheFiles.WriteAllBytes(patched, T7FastFile.Encode(header, zone, CompressionLevel.Fastest));
         return patched;
     }
 

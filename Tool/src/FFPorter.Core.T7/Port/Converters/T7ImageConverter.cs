@@ -149,6 +149,25 @@ public sealed class T7ImageConverter : IT7AssetConverter, IT7NestedConverter, IT
         return output;
     }
 
+    public static long PcSize(ImageInfo info, int firstMip, int endMip, T7Gnm.Texture? texture)
+    {
+        T7Gnm.Texture t = texture ?? info.Texture();
+        int faces = texture == null ? info.Faces : 1;
+        int count = texture == null && info.MapType is 2 or 5 ? info.Depth : 1;
+        long size = 0;
+        for (int m = firstMip; m < endMip; m++)
+            size += T7Gnm.PcSurfaceSize(info.Dxgi, Math.Max(t.Width >> m, 1), Math.Max(t.Height >> m, 1), Math.Max(t.Depth >> m, 1)) * faces * count;
+        return size;
+    }
+
+    private static byte[]? AlreadyTiled(T7PortContext context, ReadOnlySpan<byte> stored, long ps4Size, string name)
+    {
+        if (!context.Origin.Tiled(stored.Length, ps4Size))
+            return null;
+        context.Fidelity?.Raise(T7Issues.ImageAlreadyPs4, name);
+        return stored.ToArray();
+    }
+
     public static List<int> ImageStructReads(T7Walk.Asset asset)
     {
         var result = new List<int>();
@@ -248,7 +267,8 @@ public sealed class T7ImageConverter : IT7AssetConverter, IT7NestedConverter, IT
         if (info.Streamed == 0 && info.PixelsPointer == Inline && info.PixelsSize != 0)
         {
             T7Walk.Span pixels = rewrite.Take(info.PixelsSize);
-            byte[] converted = ConvertMips(info, rewrite.Bytes(pixels), 0, info.Levels, null, out _);
+            byte[] converted = AlreadyTiled(context, rewrite.Bytes(pixels), texture.TotalSize, name)
+                ?? ConvertMips(info, rewrite.Bytes(pixels), 0, info.Levels, null, out _);
             T7StructBuilder data = rewrite.Rebuild(pixels, converted.Length, deferred: info.Category != 5);
             data.Write(0, converted).MapSource(0, 0, (int)Math.Min(1, pixels.Size));
             data.Commit();
@@ -260,7 +280,8 @@ public sealed class T7ImageConverter : IT7AssetConverter, IT7NestedConverter, IT
         if (info.LowPointer == Inline && info.LowSize != 0)
         {
             T7Walk.Span low = rewrite.Take(info.LowSize);
-            byte[] converted = ConvertMips(info, rewrite.Bytes(low), 0, 1, info.LowTexture(), out _);
+            byte[] converted = AlreadyTiled(context, rewrite.Bytes(low), info.LowTexture().TotalSize, name)
+                ?? ConvertMips(info, rewrite.Bytes(low), 0, 1, info.LowTexture(), out _);
             T7StructBuilder data = rewrite.Rebuild(low, converted.Length);
             data.Write(0, converted).MapSource(0, 0, (int)Math.Min(1, low.Size));
             data.Commit();

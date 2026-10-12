@@ -5,16 +5,16 @@
         <RowDefinition Height="Auto"/>
         <RowDefinition Height="*"/>
       </Grid.RowDefinitions>
-      <DockPanel Margin="14,6,6,4">
+      <DockPanel Margin="20,10,10,6">
         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
           <Button Style="{StaticResource Button.Ghost}" Click="CopyClick" ToolTip="Copy the whole log">
-            <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Text.Icon}" Text="&#xE8C8;" FontSize="12" Margin="0,0,6,0"/><TextBlock Text="Copy"/></StackPanel>
+            <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Text.Icon}" Text="&#xE8C8;" FontSize="14" Margin="0,0,8,0"/><TextBlock Text="Copy"/></StackPanel>
           </Button>
           <Button Style="{StaticResource Button.Ghost}" Click="SaveClick" ToolTip="Save the log of the last run">
-            <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Text.Icon}" Text="&#xE74E;" FontSize="12" Margin="0,0,6,0"/><TextBlock Text="Save"/></StackPanel>
+            <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Text.Icon}" Text="&#xE74E;" FontSize="14" Margin="0,0,8,0"/><TextBlock Text="Save"/></StackPanel>
           </Button>
           <Button Style="{StaticResource Button.Ghost}" Click="ClearClick" ToolTip="Clear the log">
-            <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Text.Icon}" Text="&#xE894;" FontSize="12" Margin="0,0,6,0"/><TextBlock Text="Clear"/></StackPanel>
+            <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource Text.Icon}" Text="&#xE894;" FontSize="14" Margin="0,0,8,0"/><TextBlock Text="Clear"/></StackPanel>
           </Button>
         </StackPanel>
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -22,7 +22,7 @@
           <TextBlock x:Name="Where" Style="{StaticResource Text.Caption}" Margin="10,0,0,0" TextTrimming="CharacterEllipsis"/>
         </StackPanel>
       </DockPanel>
-      <TextBox x:Name="Text" Grid.Row="1" Style="{StaticResource TextBox.Log}" Margin="14,0,4,8"/>
+      <TextBox x:Name="Text" Grid.Row="1" Style="{StaticResource TextBox.Log}" Margin="20,0,6,12"/>
     </Grid>
   </Border>
 </UserControl>

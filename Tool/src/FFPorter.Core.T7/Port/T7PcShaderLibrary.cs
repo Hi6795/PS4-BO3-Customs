@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Text.Json;
 using FFPorter.Core.Common.Native;
+using FFPorter.Core.Common.Tools;
 using FFPorter.Core.T7.Harness;
 using FFPorter.Core.T7.Link;
 using FFPorter.Core.T7.Shaders;
@@ -19,26 +20,53 @@ public sealed class T7PcShaderLibrary
 
     private readonly Dictionary<string, Reflection> _techsets = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<string>> _catalog = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, HashSet<string>> _defining = new(StringComparer.Ordinal);
     private readonly HashSet<string> _read = new(StringComparer.OrdinalIgnoreCase);
     private string _pcImage = "", _cacheDirectory = "";
     private Action<string> _log = _ => { };
 
     public int CataloguedNames => _catalog.Count;
 
+    private static readonly string[] CoreZones = ["core_common", "core_patch", "core_pre_gfx", "core_post_gfx", "core_gfx"];
+
+    public static IReadOnlySet<string> AlwaysLoadedBefore(string zone)
+    {
+        var loaded = new HashSet<string>(CoreZones, StringComparer.OrdinalIgnoreCase);
+        loaded.Remove(zone);
+        if (zone.Length > 3 && zone[2] == '_')
+            loaded.Remove(zone[3..]);
+        return loaded;
+    }
+
+    public bool DefinedIn(string techset, IReadOnlySet<string> zones) =>
+        _defining.TryGetValue(techset.TrimStart(','), out HashSet<string>? defining) && defining.Overlaps(zones);
+
     public static T7PcShaderLibrary Create(IEnumerable<string> pcZones, string pcImage, string cacheDirectory, Action<string> log)
     {
         var library = new T7PcShaderLibrary { _pcImage = pcImage, _cacheDirectory = cacheDirectory, _log = log };
         Directory.CreateDirectory(cacheDirectory);
         int count = 0;
+        var referencing = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         foreach (string file in pcZones.Where(IsPcZone).OrderBy(f => new FileInfo(f).Length))
         {
             foreach (string name in T7DonorLibrary.HashedNames(file, cacheDirectory, log))
             {
-                if (!library._catalog.TryGetValue(name.TrimStart(','), out List<string>? files))
-                    library._catalog[name.TrimStart(',')] = files = [];
+                Dictionary<string, List<string>> zones = name.StartsWith(',') ? referencing : library._catalog;
+                string key = name.TrimStart(',');
+                if (!zones.TryGetValue(key, out List<string>? files))
+                    zones[key] = files = [];
                 files.Add(file);
             }
             count++;
+        }
+        foreach ((string name, List<string> files) in library._catalog)
+            library._defining[name] = new HashSet<string>(files.Select(file => Path.GetFileNameWithoutExtension(file)), StringComparer.OrdinalIgnoreCase);
+        foreach ((string name, List<string> files) in referencing)
+        {
+            if (!library._catalog.TryGetValue(name, out List<string>? defining))
+                library._catalog[name] = defining = [];
+            var known = new HashSet<string>(defining, StringComparer.OrdinalIgnoreCase);
+            defining.AddRange(files.Where(known.Add));
         }
         if (count > 0)
             log($"PC shader catalog: {count} zones, {library._catalog.Count} technique set names");
@@ -193,22 +221,48 @@ public sealed class T7PcShaderLibrary
     {
         string stem = $"{Path.GetFileNameWithoutExtension(file)}.{T7DonorLibrary.CacheKey(file)}";
         string cachePath = Path.Combine(_cacheDirectory, "reflection", stem + ".json");
-        if (File.Exists(cachePath) && LoadCache(cachePath) is { } cached)
+        if (TryLoadCache(cachePath) is { } cached)
             return cached;
+        using IDisposable shared = CacheFiles.Lock(cachePath);
+        if (TryLoadCache(cachePath) is { } done)
+            return done;
         string source = T7FastFileDelta.Resolve(file, _cacheDirectory, _log);
         string walkPath = Path.Combine(_cacheDirectory, stem + ".pc.t7walk");
         if (!File.Exists(walkPath))
         {
             _log($"walking PC reference zone {Path.GetFileName(file)} for technique set {wanted}");
-            string partial = walkPath + ".partial";
+            string partial = CacheFiles.Temporary(walkPath, ".partial");
             NativeProcessResult result = NativeProcess.Run(T7PcLoader.TaskName, T7PcLoader.ChildArguments(_pcImage, partial, source));
             if (result.ExitCode != 0)
+            {
+                CacheFiles.Delete(partial);
                 throw new InvalidDataException($"PC walk failed ({result.ExitCode}) {result.Stderr.Trim()}");
-            File.Move(partial, walkPath, overwrite: true);
+            }
+            CacheFiles.Publish(partial, walkPath);
+            CacheFiles.Delete(partial + ".log.jsonl");
         }
         Dictionary<string, Reflection> reflected = Reflect(T7WalkIndex.Load(Path.GetFileNameWithoutExtension(file), source, walkPath));
-        SaveCache(cachePath, reflected);
+        try
+        {
+            SaveCache(cachePath, reflected);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            _log($"  could not save the reflection of {Path.GetFileName(file)}: {error.Message}");
+        }
         return reflected;
+    }
+
+    private static Dictionary<string, Reflection>? TryLoadCache(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? LoadCache(path) : null;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidOperationException or KeyNotFoundException)
+        {
+            return null;
+        }
     }
 
     private static void SaveCache(string path, Dictionary<string, Reflection> techsets)
@@ -223,8 +277,7 @@ public sealed class T7PcShaderLibrary
             }).ToArray()),
         };
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        File.WriteAllText(path + ".tmp", JsonSerializer.Serialize(document));
-        File.Move(path + ".tmp", path, overwrite: true);
+        CacheFiles.WriteAllText(path, JsonSerializer.Serialize(document));
     }
 
     private static Dictionary<string, Reflection>? LoadCache(string path)

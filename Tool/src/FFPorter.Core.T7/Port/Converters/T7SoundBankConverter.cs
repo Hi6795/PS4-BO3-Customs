@@ -25,7 +25,7 @@ public sealed class T7SoundBankConverter : IT7AssetConverter
         byte[] zone = context.Pc.Zone;
         var files = new Dictionary<long, (string Pc, string Ps4)>();
         var renamed = new Dictionary<long, (string Pc, string Ps4)>();
-        int external = 0;
+        int external = 0, kept = 0;
         foreach (T7Walk.Span read in asset.Reads)
         {
             if (read.Kind != T7WalkKind.String || read.Size < 2)
@@ -36,7 +36,10 @@ public sealed class T7SoundBankConverter : IT7AssetConverter
             if (!context.SoundRenames.TryGetValue(text, out string? ps4))
             {
                 ps4 = T7SoundBank.Ps4AssetName(text);
-                external++;
+                if (string.Equals(ps4, text, StringComparison.Ordinal))
+                    kept++;
+                else
+                    external++;
             }
             files[read.FileOffset] = (text, ps4);
             if (!string.Equals(ps4, text, StringComparison.Ordinal))
@@ -46,6 +49,11 @@ public sealed class T7SoundBankConverter : IT7AssetConverter
         {
             context.Warnings.Add($"sound bank '{asset.Name}': {external} alias file names are not in this map's banks (game banks); renamed by the PS4 naming rule");
             context.Fidelity?.Raise(T7Issues.AliasNamesByRule, count: external);
+        }
+        if (kept > 0)
+        {
+            context.Log($"  sound bank '{asset.Name}': {kept} alias file names are not in this map's banks and already carry PS4 names (kept)");
+            context.Fidelity?.Raise(T7Issues.AliasNamesKept, count: kept);
         }
 
         var aliases = new HashSet<long>();

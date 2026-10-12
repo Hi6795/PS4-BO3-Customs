@@ -8,7 +8,12 @@ using D = FFPorter.Core.Common.Fidelity.FidelityDimension;
 
 namespace FFPorter.Core.T7.Port;
 
-public sealed record T7Issue(string Key, FidelityDimension Dimension, FidelityGrade? Grade, Func<long, string?, string> Text);
+public sealed record T7Issue(string Key, FidelityDimension Dimension, FidelityGrade? Grade, Func<long, string?, string> Text)
+{
+    public bool Native { get; init; }
+
+    public FidelityGrade? Counts => Native ? FidelityGrade.Native : Grade;
+}
 
 public static class T7Issues
 {
@@ -23,11 +28,17 @@ public static class T7Issues
     public static readonly T7Issue ConstantBufferFromReference = new("material.cb-reference", Materials, Good,
         (n, s) => $"{N(n, "material", "materials")} took constant buffers from the PS4 reference zones, because no PC shader describes {Use(n, "it", "them")}{Example(s)}");
     public static readonly T7Issue TechniqueSetCompiled = new("techset.compiled", Materials, Strong,
-        (n, _) => $"{N(n, "technique set", "technique sets")} {Were(n)} compiled for PS4 from {Use(n, "its", "their")} PC shaders (DXBC to PSSL)");
+        (n, _) => $"{N(n, "technique set", "technique sets")} {Were(n)} compiled for PS4 from {Use(n, "its", "their")} PC shaders (DXBC to PSSL)") { Native = true };
+    public static readonly T7Issue TechniqueSetFromGame = new("techset.game", Materials, null,
+        (n, _) => $"{N(n, "technique set", "technique sets")} the game already has {Use(n, "uses", "use")} the game's own PS4 shaders");
     public static readonly T7Issue TechniqueSetDonor = new("techset.donor", Materials, Strong,
         (n, _) => $"{N(n, "technique set", "technique sets")} came from the PS4 reference zones");
     public static readonly T7Issue VertexUsageUnknown = new("techset.vertex-usage", Materials, Approximate,
         (n, s) => $"{N(n, "technique set", "technique sets")} {Use(n, "uses", "use")} vertex streams with no known PS4 meaning, kept in PC order{Example(s)}");
+    public static readonly T7Issue GeometryShaderDropped = new("techset.geometry-shader", Materials, Approximate,
+        (n, s) => $"{N(n, "technique set", "technique sets")} {Use(n, "uses", "use")} a geometry shader, which the PS4 game cannot run{Example(s)}");
+    public static readonly T7Issue TessellationUnbound = new("techset.tessellation-unbound", Materials, Approximate,
+        (n, s) => $"{N(n, "tessellated technique set", "tessellated technique sets")} {Use(n, "reads", "read")} textures or material values the PS4 hull stage is not given{Example(s)}");
     public static readonly T7Issue DupMaterialsLeftOut = new("material.dup", Materials, null,
         (n, _) => $"{N(n, "PC-only \"|dup\" material copy", "PC-only \"|dup\" material copies")} left out, as the PS4 build does");
 
@@ -41,29 +52,47 @@ public static class T7Issues
         (n, s) => $"{N(n, "image has a streamed part", "images have streamed parts")} whose size differs from the PS4 layout{Example(s)}");
     public static readonly T7Issue SAnimLayoutKept = new("sanim.layout", Textures, Approximate,
         (n, s) => $"{N(n, "animated texture is", "animated textures are")} laid out in a way this port has no PS4 rule for; {Use(n, "its", "their")} PC texels were kept{Example(s)}");
+    public static readonly T7Issue ImageAlreadyPs4 = new("image.ps4-layout", Textures, null,
+        (n, _) => $"{N(n, "image", "images")} in the zone {Were(n)} already in the PS4 layout and kept as {Use(n, "it is", "they are")}");
 
     public static readonly T7Issue MeshesNotPlanned = new("xmodel.unplanned", Geometry, Approximate,
         (n, s) => $"the streamed meshes of {N(n, "model", "models")} could not be planned and keep the PC vertex format{Example(s)}");
     public static readonly T7Issue MeshSizeMismatch = new("xmodel.mesh-size", Geometry, Approximate,
         (n, _) => $"{N(n, "streamed mesh", "streamed meshes")} did not match {Use(n, "its", "their")} surface description and {Were(n)} copied unchanged");
     public static readonly T7Issue TexelDensityScale = new("xmodel.texel-density", Geometry, null,
-        (_, _) => "LOD texel densities use a fixed PS4 scale (the console linker's per-material factor is not stored in PC zones)");
+        (_, _) => "LOD texel densities follow the console linker's rule");
+    public static readonly T7Issue TexelDensityFixed = new("xmodel.texel-density-fixed", Geometry, Strong,
+        (n, _) => $"{N(n, "model material uses", "model materials use")} a fixed texel density scale") { Native = true };
+    public static readonly T7Issue TexelDensityKept = new("xmodel.texel-density-ps4", Geometry, null,
+        (_, _) => "LOD texel densities are the PS4 values the map already carries");
+    public static readonly T7Issue MeshAlreadyPs4 = new("xmodel.ps4-vertices", Geometry, null,
+        (n, _) => $"{N(n, "mesh", "meshes")} in the zone {Were(n)} already in the PS4 vertex format and kept as {Use(n, "it is", "they are")}");
+    public static readonly T7Issue MeshNormalsRestored = new("xmodel.ps4-normals", Geometry, null,
+        (n, _) => $"{N(n, "mesh", "meshes")} in the zone got back the PS4 normals {Use(n, "its", "their")} PC copy was made from");
 
     public static readonly T7Issue WorldNotPlanned = new("gfxworld.unplanned", World, Approximate,
         (_, s) => $"the world's streamed items could not be planned and keep their PC form{Example(s)}");
     public static readonly T7Issue WrappedItemSize = new("gfxworld.wrapped", World, Good,
         (n, _) => $"{N(n, "wrapped world item has", "wrapped world items have")} no image dimensions; the PC logical sizes are kept");
     public static readonly T7Issue WorldTexelDensity = new("gfxworld.texel-density", World, null,
-        (_, _) => "surface texel densities use the same fixed PS4 scale as models");
+        (_, _) => "surface texel densities follow the same rule as models");
+    public static readonly T7Issue WorldTexelDensityFixed = new("gfxworld.texel-density-fixed", World, Strong,
+        (n, _) => $"{N(n, "world surface uses", "world surfaces use")} a fixed texel density scale") { Native = true };
+    public static readonly T7Issue WorldTexelDensityKept = new("gfxworld.texel-density-ps4", World, null,
+        (_, _) => "surface texel densities are the PS4 values the map already carries");
+    public static readonly T7Issue WorldNormalsKept = new("gfxworld.ps4-vertices", World, null,
+        (_, _) => "the world's vertex normals were already in the PS4 format and kept as they are");
+    public static readonly T7Issue WorldNormalsRestored = new("gfxworld.ps4-normals", World, null,
+        (_, _) => "the world's vertex normals got back the PS4 values their PC copy was made from");
     public static readonly T7Issue MovieEncoded = new("movie.encoded", World, Strong,
-        (n, s) => $"{N(n, "movie", "movies")} re-encoded as 1920x1080 H.264 for the PS4 decoder{Example(s)}");
+        (n, s) => $"{N(n, "movie", "movies")} re-encoded as 1920x1080 H.264 for the PS4 decoder{Example(s)}") { Native = true };
     public static readonly T7Issue MovieCopied = new("movie.copied", World, null,
         (n, _) => $"{N(n, "movie was", "movies were")} already PS4-ready and copied as {Use(n, "it is", "they are")}");
     public static readonly T7Issue MovieFailed = new("movie.failed", World, Missing,
         (n, s) => $"{N(n, "movie", "movies")} could not be converted{Example(s)}");
 
     public static readonly T7Issue SoundReencoded = new("sound.reencoded", D.Sound, Strong,
-        (n, _) => $"{N(n, "sound", "sounds")} re-encoded from FLAC to MP3, the only format the PS4 plays, at the highest quality it decodes");
+        (n, _) => $"{N(n, "sound", "sounds")} re-encoded from FLAC to MP3, the only format the PS4 plays, at the highest quality it decodes") { Native = true };
     public static readonly T7Issue SoundResampled = new("sound.resampled", D.Sound, Strong,
         (n, _) => $"{N(n, "sound", "sounds")} resampled to 48 kHz");
     public static readonly T7Issue LoopRetimed = new("sound.loop", D.Sound, Strong,
@@ -74,6 +103,8 @@ public static class T7Issues
         (n, s) => $"{N(n, "loaded sound", "loaded sounds")} now {Use(n, "streams", "stream")} from the map's stream bank, because the map loads more sound than the PS4 keeps in memory{Example(s)}");
     public static readonly T7Issue AliasNamesByRule = new("sound.external-names", D.Sound, Good,
         (n, _) => $"{N(n, "alias plays", "aliases play")} files from the base game's banks, renamed by the PS4 naming rule");
+    public static readonly T7Issue AliasNamesKept = new("sound.ps4-names", D.Sound, null,
+        (n, _) => $"{N(n, "alias plays", "aliases play")} base game files under the PS4 names the map already carries");
     public static readonly T7Issue AliasIdMismatch = new("sound.id-mismatch", D.Sound, Approximate,
         (n, _) => $"{N(n, "alias file name has", "alias file names have")} no matching asset id and {Were(n)} left unchanged");
     public static readonly T7Issue SoundBankFailed = new("sound.bank-failed", D.Sound, Missing,
@@ -87,8 +118,8 @@ public static class T7Issues
         (n, _) => $"{N(n, "script was", "scripts were")} remapped to PS4 opcodes and checked by decompiling with acts");
     public static readonly T7Issue ScriptRecompiled = new("script.recompiled", D.Scripts, Strong,
         (n, _) => $"{N(n, "script was", "scripts were")} decompiled and recompiled with acts");
-    public static readonly T7Issue BuiltinRewritten = new("script.builtin", D.Scripts, Good,
-        (n, s) => $"{N(n, "script calls", "scripts call")} PC-only builtins, now pointed at PS4 stand-ins{Example(s)}");
+    public static readonly T7Issue BuiltinProvided = new("script.builtin", D.Scripts, null,
+        (n, s) => $"{N(n, "script calls", "scripts call")} PC-only builtins, which the newest BO3-Customs plugin provides{Example(s)}");
     public static readonly T7Issue BuiltinsUnchecked = new("script.builtins-missing", D.Scripts, null,
         (_, _) => "the PS4 builtin table is missing, so calls to PC-only builtins were not checked");
 
@@ -138,6 +169,9 @@ public static class T7Issues
     internal static T7Issue StreamKeyVerified(FidelityDimension dimension) => Make("stream.key-verified", dimension, Exact,
         (n, _) => $"{N(n, "streamed item hashes", "streamed items hash")} to the PS4 {Use(n, "key", "keys")} the map already carries, so {Use(n, "it is", "they are")} byte-identical to the original PS4 data");
 
+    internal static T7Issue StreamAlreadyPs4(FidelityDimension dimension, string singular, string plural) => Make($"stream.kept.{plural}", dimension, null,
+        (n, _) => $"{N(n, singular, plural)} {Were(n)} already in PS4 form and kept as {Use(n, "it is", "they are")}");
+
     internal static T7Issue StreamBundled(FidelityDimension dimension, string singular, string plural) => Make($"stream.bundled.{plural}", dimension, null,
         (n, _) => $"{N(n, singular, plural)} the map borrows from the base game {Were(n)} converted into its xpaks");
 }
@@ -149,6 +183,7 @@ public sealed class T7Fidelity
         public string Key { get; } = key;
         public double Weight { get; set; }
         public double Finished { get; set; }
+        public double Partial { get; set; }
     }
 
     private sealed class Phase(string key, double weight, Row row)
@@ -157,15 +192,117 @@ public sealed class T7Fidelity
         public double Weight { get; set; } = weight;
         public Row Row { get; } = row;
         public bool Finished { get; set; }
+        public bool Entered { get; set; }
+        public bool Weighed { get; set; }
+        public long Started { get; set; } = -1;
+        public double Fraction { get; set; }
     }
+
+    public sealed record PlanUnit(IReadOnlyList<string> Phases, IReadOnlyList<int> After, string? Lane, int LaneWidth);
 
     public const string PrepareStep = "prepare";
 
+    private const double TrustFrom = 0.05, TrustSpan = 0.25, MostTrust = 0.6, LeastSeconds = 2, LeastLeft = 0.1, LeastMeasured = 2;
+    private const long EstimateEveryMs = 200;
+    private long _estimatedAt = -1;
+
+    private readonly FFPorter.Core.Common.Tools.ActiveClock _clock = FFPorter.Core.Common.Tools.ActiveClock.StartNew();
+    private readonly Dictionary<string, (double Weight, double Seconds)> _measured = new(StringComparer.Ordinal);
+    private IReadOnlyList<PlanUnit> _plan = [];
+    private bool _planConcurrent;
+    private string? _planGate;
+
+    public T7Timing? Timing { get; set; }
+
+    public static string Kind(string phase) =>
+        phase.StartsWith("zone:", StringComparison.Ordinal) ? phase[(phase.LastIndexOf(':') + 1)..]
+        : phase.StartsWith("bank:", StringComparison.Ordinal) ? "bank"
+        : phase.StartsWith("movie:", StringComparison.Ordinal) ? "movie" : "";
+
+    public void Plan(IReadOnlyList<PlanUnit> units, bool concurrent, string? gate)
+    {
+        lock (_gate)
+        {
+            _plan = units;
+            _planConcurrent = concurrent;
+            _planGate = gate;
+        }
+    }
+
+    public double? Remaining()
+    {
+        lock (_gate)
+            return Estimate();
+    }
+
+    private double Rate(string kind) =>
+        _measured.TryGetValue(kind, out (double Weight, double Seconds) seen) && seen.Weight >= LeastMeasured ? seen.Seconds / seen.Weight : Timing?.Rate(kind, _planConcurrent) ?? 1;
+
+    private bool Learned(string kind) =>
+        (_measured.TryGetValue(kind, out (double Weight, double Seconds) seen) && seen.Weight >= LeastMeasured) || Timing?.Knows(kind, _planConcurrent) == true;
+
+    private double? Estimate()
+    {
+        if (_plan.Count == 0 || _planGate == null || !_phases.TryGetValue(_planGate, out Phase? gate) || !(gate.Weighed || gate.Entered || gate.Finished))
+            return null;
+        long now = _clock.ElapsedMilliseconds;
+        double Left(string key)
+        {
+            if (!_phases.TryGetValue(key, out Phase? phase) || phase.Finished)
+                return 0;
+            double whole = phase.Weight * Rate(Kind(key));
+            if (!phase.Entered)
+                return whole;
+            double elapsed = (now - phase.Started) / 1000.0, done = phase.Fraction;
+            if (done <= 0)
+                return Math.Max(whole - elapsed, whole * LeastLeft);
+            double trust = elapsed >= LeastSeconds ? Math.Clamp((done - TrustFrom) / TrustSpan, 0, Learned(Kind(key)) ? MostTrust : 1) : 0;
+            return whole * (1 - done) * (1 - trust) + elapsed * (1 - done) / done * trust;
+        }
+        double[] left = [.. _plan.Select(unit => unit.Phases.Sum(Left))];
+        if (!_planConcurrent)
+            return left.Sum();
+        var lanes = new Dictionary<string, double>(StringComparer.Ordinal);
+        foreach (IGrouping<string, int> lane in Enumerable.Range(0, _plan.Count).Where(i => _plan[i].Lane != null).GroupBy(i => _plan[i].Lane!, StringComparer.Ordinal))
+            lanes[lane.Key] = Math.Max(lane.Max(i => left[i]), lane.Sum(i => left[i]) / Math.Max(1, _plan[lane.First()].LaneWidth));
+        var finish = new double[_plan.Count];
+        for (int i = 0; i < _plan.Count; i++)
+        {
+            double start = 0;
+            foreach (int before in _plan[i].After)
+            {
+                if (before >= 0 && before < i)
+                    start = Math.Max(start, finish[before]);
+            }
+            finish[i] = start + (_plan[i].Lane is string name ? left[i] > 0 ? lanes[name] : 0 : left[i]);
+        }
+        return finish.Max();
+    }
+
+    private void Measure(Phase phase)
+    {
+        if (!phase.Entered || phase.Started < 0)
+            return;
+        double seconds = (_clock.ElapsedMilliseconds - phase.Started) / 1000.0;
+        string kind = Kind(phase.Key);
+        if (kind.Length == 0 || (kind == "shaders" && !phase.Weighed))
+            return;
+        if (phase.Weight >= LeastMeasured && seconds > 0)
+        {
+            (double weight, double total) = _measured.GetValueOrDefault(kind);
+            _measured[kind] = (weight + phase.Weight, total + seconds);
+        }
+        Timing?.Learn(kind, phase.Weight, seconds, _planConcurrent);
+        if (kind == "shaders" && phase.Key == _planGate)
+            Timing?.LearnShaders(seconds);
+    }
+
     private readonly Dictionary<string, Phase> _phases = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Row> _rows = new(StringComparer.Ordinal);
-    private Phase? _phase;
-    private double _total, _finished;
-    private T7Walk.Asset? _asset;
+    private readonly AsyncLocal<Phase?> _phase = new();
+    private readonly AsyncLocal<T7Walk.Asset?> _asset = new();
+    private readonly object _gate = new();
+    private double _total, _finished, _partial;
     private readonly Dictionary<string, (T7Issue Issue, string? Sample, long Count)> _assetIssues = new(StringComparer.Ordinal);
     private readonly Dictionary<(FidelityDimension Dimension, FidelityGrade Grade), long> _pendingStreamGrades = [];
 
@@ -175,26 +312,38 @@ public sealed class T7Fidelity
 
     public int ZonesNotWritten { get; private set; }
 
+    public bool Concurrent
+    {
+        get => Tracker.Overlap;
+        set => Tracker.Overlap = value;
+    }
+
     public void ZoneNotWritten()
     {
-        ZonesNotWritten++;
-        Fail();
+        lock (_gate)
+        {
+            ZonesNotWritten++;
+            Fail();
+        }
     }
 
     public void AddStep(string key, string title, IEnumerable<(string Phase, double Weight)> phases)
     {
-        if (!_rows.TryGetValue(key, out Row? row))
-            _rows[key] = row = new Row(key);
-        foreach ((string name, double weight) in phases)
+        lock (_gate)
         {
-            if (_phases.ContainsKey(name))
-                continue;
-            double kept = Math.Max(0, weight);
-            _phases[name] = new Phase(name, kept, row);
-            row.Weight += kept;
-            _total += kept;
+            if (!_rows.TryGetValue(key, out Row? row))
+                _rows[key] = row = new Row(key);
+            foreach ((string name, double weight) in phases)
+            {
+                if (_phases.ContainsKey(name))
+                    continue;
+                double kept = Math.Max(0, weight);
+                _phases[name] = new Phase(name, kept, row);
+                row.Weight += kept;
+                _total += kept;
+            }
+            Tracker.AddStep(key, title);
         }
-        Tracker.AddStep(key, title);
     }
 
     public void Prepare()
@@ -211,61 +360,111 @@ public sealed class T7Fidelity
 
     public void Enter(string phase, string stage, string detail = "")
     {
-        if (_phases.TryGetValue(phase, out Phase? next) && next != _phase)
+        lock (_gate)
         {
-            Finish(_phase);
-            _phase = next;
-            Tracker.StartStep(next.Row.Key, detail);
-            Report(0, detail);
+            if (_phases.TryGetValue(phase, out Phase? next) && next != _phase.Value)
+            {
+                Finish(_phase.Value);
+                _phase.Value = next;
+                next.Entered = true;
+                next.Started = _clock.ElapsedMilliseconds;
+                Tracker.StartStep(next.Row.Key, detail);
+                Report(0, detail);
+            }
+            Tracker.Stage(stage, detail);
         }
-        Tracker.Stage(stage, detail);
     }
 
     public void Step(double fraction, string? detail = null)
     {
-        if (detail != null)
-            Tracker.Detail(detail);
-        Report(Math.Clamp(fraction, 0, 1), detail);
+        lock (_gate)
+        {
+            if (detail != null)
+                Tracker.Detail(detail);
+            Report(Math.Clamp(fraction, 0, 1), detail);
+        }
     }
 
     public void PlaceNext(string step) => Tracker.PlaceNext(step);
 
     public void Reweigh(string phase, double weight)
     {
-        if (!_phases.TryGetValue(phase, out Phase? found) || found.Finished || found == _phase)
-            return;
-        double kept = Math.Max(0, weight);
-        found.Row.Weight += kept - found.Weight;
-        _total += kept - found.Weight;
-        found.Weight = kept;
+        lock (_gate)
+        {
+            if (!_phases.TryGetValue(phase, out Phase? found) || found.Finished || found.Entered)
+                return;
+            double kept = Math.Max(0, weight);
+            found.Row.Weight += kept - found.Weight;
+            _total += kept - found.Weight;
+            found.Weight = kept;
+            found.Weighed = true;
+        }
     }
 
     public void Fail()
     {
-        if (_phase != null)
-            Tracker.FailStep(_phase.Row.Key);
+        lock (_gate)
+        {
+            if (_phase.Value != null)
+                Tracker.FailStep(_phase.Value.Row.Key);
+        }
     }
 
     public void Skip(string step)
     {
-        foreach (Phase phase in _phases.Values.Where(p => p.Row.Key == step))
-            Finish(phase);
-        Tracker.SkipStep(step);
-        Report(0, null);
+        lock (_gate)
+        {
+            foreach (Phase phase in _phases.Values.Where(p => p.Row.Key == step))
+                Finish(phase);
+            Tracker.SkipStep(step);
+            Report(0, null);
+        }
+    }
+
+    public void EndStep(string step)
+    {
+        lock (_gate)
+        {
+            foreach (Phase phase in _phases.Values.Where(p => p.Row.Key == step))
+                Finish(phase);
+            if (_phase.Value?.Row.Key == step)
+                _phase.Value = null;
+            Tracker.EndStep(step);
+            Report(0, null);
+        }
+    }
+
+    public void EndCurrent()
+    {
+        lock (_gate)
+        {
+            if (_phase.Value is not { } current)
+                return;
+            EndStep(current.Row.Key);
+            _phase.Value = null;
+        }
     }
 
     public void EndZone(string zone)
     {
-        string prefix = ZonePhase(zone, "");
-        foreach (Phase phase in _phases.Values.Where(p => p.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
-            Finish(phase);
-        Report(0, null);
+        lock (_gate)
+        {
+            string prefix = ZonePhase(zone, "");
+            foreach (Phase phase in _phases.Values.Where(p => p.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+                Finish(phase);
+            Report(0, null);
+        }
     }
 
     private void Finish(Phase? phase)
     {
         if (phase is not { Finished: false })
             return;
+        Measure(phase);
+        double partial = phase.Weight * phase.Fraction;
+        phase.Row.Partial -= partial;
+        _partial -= partial;
+        phase.Fraction = 0;
         phase.Finished = true;
         phase.Row.Finished += phase.Weight;
         _finished += phase.Weight;
@@ -273,14 +472,25 @@ public sealed class T7Fidelity
 
     private void Report(double fraction, string? detail)
     {
-        double current = _phase is { Finished: false } open ? open.Weight * fraction : 0;
-        if (_phase != null)
+        if (_phase.Value is { } current)
         {
-            Row row = _phase.Row;
-            Tracker.StepProgress(row.Key, row.Weight > 0 ? Math.Min(1, (row.Finished + current) / row.Weight) : fraction, detail);
+            if (!current.Finished)
+            {
+                double change = current.Weight * (fraction - current.Fraction);
+                current.Fraction = fraction;
+                current.Row.Partial += change;
+                _partial += change;
+            }
+            Row row = current.Row;
+            Tracker.StepProgress(row.Key, row.Weight > 0 ? Math.Min(1, (row.Finished + Math.Max(0, row.Partial)) / row.Weight) : fraction, detail);
+        }
+        if (_clock.ElapsedMilliseconds - _estimatedAt >= EstimateEveryMs || _estimatedAt < 0)
+        {
+            _estimatedAt = _clock.ElapsedMilliseconds;
+            Tracker.Remaining(Estimate());
         }
         if (_total > 0)
-            Tracker.Progress(Math.Min(1, (_finished + current) / _total));
+            Tracker.Progress(Math.Min(1, (_finished + Math.Max(0, _partial)) / _total));
     }
 
 
@@ -407,38 +617,60 @@ public sealed class T7Fidelity
 
     public void BeginAsset(T7Walk.Asset asset)
     {
-        _asset = asset;
-        _assetIssues.Clear();
+        lock (_gate)
+        {
+            _asset.Value = asset;
+            _assetIssues.Clear();
+        }
     }
 
     public void Raise(T7Issue issue, string? sample = null, long count = 1)
     {
-        if (_asset != null)
+        lock (_gate)
         {
-            _assetIssues.TryAdd($"{issue.Key}|{issue.Dimension}|{sample}", (issue, sample, count));
-            return;
+            if (_asset.Value != null)
+            {
+                _assetIssues.TryAdd($"{issue.Key}|{issue.Dimension}|{sample}", (issue, sample, count));
+                return;
+            }
+            Tracker.Note(issue.Dimension, issue.Key, issue.Grade, count, issue.Text, sample);
         }
-        Tracker.Note(issue.Dimension, issue.Key, issue.Grade, count, issue.Text, sample);
     }
 
     public void RaiseStreamItem(T7Issue issue, string? sample = null)
     {
-        if (issue.Grade is FidelityGrade grade)
-            _pendingStreamGrades[(issue.Dimension, grade)] = _pendingStreamGrades.GetValueOrDefault((issue.Dimension, grade)) + 1;
-        Tracker.Note(issue.Dimension, issue.Key, issue.Grade, 1, issue.Text, sample);
+        lock (_gate)
+        {
+            if (issue.Counts is FidelityGrade grade)
+                _pendingStreamGrades[(issue.Dimension, grade)] = _pendingStreamGrades.GetValueOrDefault((issue.Dimension, grade)) + 1;
+            Tracker.Note(issue.Dimension, issue.Key, issue.Grade, 1, issue.Text, sample);
+        }
     }
 
-    public void DiscardAssetIssues() => _assetIssues.Clear();
+    public void DiscardAssetIssues()
+    {
+        lock (_gate)
+            _assetIssues.Clear();
+    }
 
     public void AbandonAsset()
     {
-        _asset = null;
-        _assetIssues.Clear();
+        lock (_gate)
+        {
+            _asset.Value = null;
+            _assetIssues.Clear();
+        }
     }
 
     public void EndAsset(T7Walk.Asset asset, string? converter, string? failure)
     {
-        _asset = null;
+        lock (_gate)
+            EndAssetLocked(asset, converter, failure);
+    }
+
+    private void EndAssetLocked(T7Walk.Asset asset, string? converter, string? failure)
+    {
+        _asset.Value = null;
         IEnumerable<int> types = asset.Registrations.Count > 0 ? asset.Registrations.Select(r => r.Type) : [asset.Type];
         foreach (IGrouping<int, int> group in types.GroupBy(t => t))
         {
@@ -469,7 +701,7 @@ public sealed class T7Fidelity
         }
         foreach ((T7Issue issue, string? sample, long count) in _assetIssues.Values)
         {
-            if (issue.Grade is FidelityGrade grade)
+            if (issue.Counts is FidelityGrade grade)
                 Tracker.Downgrade(issue.Dimension, grade);
             Tracker.Note(issue.Dimension, issue.Key, issue.Grade, count, issue.Text, sample);
         }
@@ -480,6 +712,12 @@ public sealed class T7Fidelity
 
 
     public void Streams(T7StreamConvertResult result, T7StreamPlan plan)
+    {
+        lock (_gate)
+            StreamsLocked(result, plan);
+    }
+
+    private void StreamsLocked(T7StreamConvertResult result, T7StreamPlan plan)
     {
         foreach ((string what, int count) in result.Counts)
         {
@@ -526,6 +764,11 @@ public sealed class T7Fidelity
         {
             bundled = true;
             source = source["external, bundled (".Length..^1];
+        }
+        if (source.EndsWith(T7StreamConvert.KeptSuffix, StringComparison.Ordinal))
+        {
+            T7Issue kept = T7Issues.StreamAlreadyPs4(dimension, singular, plural);
+            Tracker.Note(dimension, kept.Key, kept.Grade, count, kept.Text);
         }
         switch (source)
         {
@@ -582,7 +825,7 @@ public sealed class T7Fidelity
     public void SoundBank(int entries, int reencoded, int resampled, int retimed, int silenced = 0)
     {
         Tracker.Add(D.Sound, Exact, entries - reencoded);
-        Tracker.Add(D.Sound, Strong, reencoded);
+        Tracker.Add(D.Sound, Native, reencoded);
         Tracker.Content(D.Sound, "sound", "sounds", entries);
         Tracker.Note(D.Sound, T7Issues.SoundReencoded.Key, T7Issues.SoundReencoded.Grade, reencoded, T7Issues.SoundReencoded.Text);
         Tracker.Note(D.Sound, T7Issues.SoundResampled.Key, T7Issues.SoundResampled.Grade, resampled, T7Issues.SoundResampled.Text);
@@ -610,7 +853,7 @@ public sealed class T7Fidelity
     public void Movie(string name, Formats.T7MovieTranscoder.Outcome outcome)
     {
         T7Issue issue = outcome == Formats.T7MovieTranscoder.Outcome.Copied ? T7Issues.MovieCopied : T7Issues.MovieEncoded;
-        Tracker.Add(World, outcome == Formats.T7MovieTranscoder.Outcome.Copied ? Exact : Strong);
+        Tracker.Add(World, outcome == Formats.T7MovieTranscoder.Outcome.Copied ? Exact : Native);
         Tracker.Content(World, "movie", "movies");
         Tracker.Note(World, issue.Key, issue.Grade, 1, issue.Text, name);
     }

@@ -1,5 +1,6 @@
 using System.Text;
 using FFPorter.Core.Common.Native;
+using FFPorter.Core.Common.Tools;
 using FFPorter.Core.T7.Harness;
 using FFPorter.Core.T7.Link;
 
@@ -78,15 +79,21 @@ public sealed class T7DonorLibrary
             string walkPath = Path.Combine(_cacheDirectory, $"{Path.GetFileNameWithoutExtension(file)}.{CacheKey(file)}.ps4.t7walk");
             if (!File.Exists(walkPath))
             {
-                _log($"walking PS4 reference zone {Path.GetFileName(file)}");
-                string partial = walkPath + ".partial";
-                NativeProcessResult result = NativeProcess.Run(T7Ps4Loader.TaskName, T7Ps4Loader.ChildArguments(_loaderDirectory, partial, source));
-                if (result.ExitCode != 0)
+                using IDisposable shared = CacheFiles.Lock(walkPath);
+                if (!File.Exists(walkPath))
                 {
-                    _log($"  skipped {Path.GetFileName(file)}: PS4 walk failed ({result.ExitCode}) {result.Stderr.Trim()}");
-                    return false;
+                    _log($"walking PS4 reference zone {Path.GetFileName(file)}");
+                    string partial = CacheFiles.Temporary(walkPath, ".partial");
+                    NativeProcessResult result = NativeProcess.Run(T7Ps4Loader.TaskName, T7Ps4Loader.ChildArguments(_loaderDirectory, partial, source));
+                    if (result.ExitCode != 0)
+                    {
+                        CacheFiles.Delete(partial);
+                        _log($"  skipped {Path.GetFileName(file)}: PS4 walk failed ({result.ExitCode}) {result.Stderr.Trim()}");
+                        return false;
+                    }
+                    CacheFiles.Publish(partial, walkPath);
+                    CacheFiles.Delete(partial + ".log.jsonl");
                 }
-                File.Move(partial, walkPath, overwrite: true);
             }
             Add(T7WalkIndex.Load(Path.GetFileNameWithoutExtension(file), source, walkPath));
             return true;
@@ -103,8 +110,14 @@ public sealed class T7DonorLibrary
     internal static IReadOnlyList<string> HashedNames(string file, string cacheDirectory, Action<string> log)
     {
         string cache = Path.Combine(cacheDirectory, "names", $"{Path.GetFileNameWithoutExtension(file)}.{CacheKey(file)}.names.txt");
-        if (File.Exists(cache))
-            return File.ReadAllLines(cache);
+        try
+        {
+            if (File.Exists(cache))
+                return File.ReadAllLines(cache);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+        }
         var names = new HashSet<string>(StringComparer.Ordinal);
         try
         {
@@ -129,8 +142,15 @@ public sealed class T7DonorLibrary
             log($"  could not index {Path.GetFileName(file)}: {error.Message}");
             return [];
         }
-        Directory.CreateDirectory(Path.GetDirectoryName(cache)!);
-        File.WriteAllLines(cache, names.Order(StringComparer.Ordinal));
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(cache)!);
+            CacheFiles.WriteAllLines(cache, names.Order(StringComparer.Ordinal));
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            log($"  could not save the names of {Path.GetFileName(file)}: {error.Message}");
+        }
         return names.ToList();
     }
 

@@ -10,6 +10,8 @@ namespace FFPorter.Core.T7.Port.Converters;
 public sealed class T7GfxWorldConverter : IT7AssetConverter, IT7StreamPlanner
 {
     public const int WorldSize = 8256;
+    private const int LayerRecordSize = 20;
+    private static readonly int[] LayerUnitVectors = [12, 16];
 
     public string Name => "gfxworld";
 
@@ -307,9 +309,13 @@ public sealed class T7GfxWorldConverter : IT7AssetConverter, IT7StreamPlanner
                 if (builder != null)
                 {
                     builder.MoveAll();
-                    context.Fidelity?.Raise(T7Issues.WorldTexelDensity);
-                    for (int k = 0; k < n; k++)
-                        ScaleFloat(builder, 184 * k + 168);
+                    bool kept = context.Origin.IsPs4;
+                    context.Fidelity?.Raise(kept ? T7Issues.WorldTexelDensityKept : T7Issues.WorldTexelDensity);
+                    int unruled = 0;
+                    for (int k = 0; k < n && !kept; k++)
+                        unruled += ScaleFloat(builder, 184 * k + 168, decals + 184L * k + 152) ? 0 : 1;
+                    if (unruled > 0)
+                        context.Fidelity?.Raise(T7Issues.WorldTexelDensityFixed, null, unruled);
                     builder.Commit();
                 }
                 for (int k = 0; k < n; k++)
@@ -335,10 +341,14 @@ public sealed class T7GfxWorldConverter : IT7AssetConverter, IT7StreamPlanner
             }
         }
 
-        private static void ScaleFloat(T7StructBuilder builder, int at)
+        private bool ScaleFloat(T7StructBuilder builder, int at, long materialField)
         {
             float value = BinaryPrimitives.ReadSingleLittleEndian(builder.Data.AsSpan(at));
-            BinaryPrimitives.WriteSingleLittleEndian(builder.Data.AsSpan(at), value * T7XModelConverter.TexelDensityScale);
+            if (value == 0)
+                return true;
+            float? scale = context.TexelDensity.Of(materialField);
+            BinaryPrimitives.WriteSingleLittleEndian(builder.Data.AsSpan(at), value * (scale ?? T7XModelConverter.TexelDensityScale));
+            return scale != null;
         }
 
         private void Volume(long volume)
@@ -544,11 +554,10 @@ public sealed class T7GfxWorldConverter : IT7AssetConverter, IT7StreamPlanner
                 if (builder != null)
                 {
                     builder.MoveAll();
-                    for (int at = 0; at + 20 <= size; at += 20)
-                    {
-                        BinaryPrimitives.WriteUInt32LittleEndian(builder.Data.AsSpan(at + 12), T7XModelConverter.RepackUnitVector(BinaryPrimitives.ReadUInt32LittleEndian(builder.Data.AsSpan(at + 12))));
-                        BinaryPrimitives.WriteUInt32LittleEndian(builder.Data.AsSpan(at + 16), T7XModelConverter.RepackUnitVector(BinaryPrimitives.ReadUInt32LittleEndian(builder.Data.AsSpan(at + 16))));
-                    }
+                    T7NormalForm form = T7PackedNormals.Classify(builder.Data, 0, LayerRecordSize, size / LayerRecordSize, LayerUnitVectors, context.Origin.IsPs4);
+                    T7PackedNormals.Convert(builder.Data, 0, LayerRecordSize, size / LayerRecordSize, LayerUnitVectors, form);
+                    if (form != T7NormalForm.Pc)
+                        context.Fidelity?.Raise(form == T7NormalForm.Ps4 ? T7Issues.WorldNormalsKept : T7Issues.WorldNormalsRestored);
                     builder.Commit();
                 }
             }
@@ -571,9 +580,13 @@ public sealed class T7GfxWorldConverter : IT7AssetConverter, IT7StreamPlanner
                 if (builder != null)
                 {
                     builder.MoveAll();
-                    context.Fidelity?.Raise(T7Issues.WorldTexelDensity);
-                    for (int k = 0; k < n; k++)
-                        ScaleFloat(builder, 96 * k + 36);
+                    bool kept = context.Origin.IsPs4;
+                    context.Fidelity?.Raise(kept ? T7Issues.WorldTexelDensityKept : T7Issues.WorldTexelDensity);
+                    int unruled = 0;
+                    for (int k = 0; k < n && !kept; k++)
+                        unruled += ScaleFloat(builder, 96 * k + 36, surfaces + 96L * k + 72) ? 0 : 1;
+                    if (unruled > 0)
+                        context.Fidelity?.Raise(T7Issues.WorldTexelDensityFixed, null, unruled);
                     builder.Commit();
                 }
                 for (int k = 0; k < n; k++)

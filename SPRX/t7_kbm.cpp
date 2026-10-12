@@ -1,6 +1,7 @@
 #include "headers.hpp"
 #include "t7_kbm.hpp"
 #include "t7_kbm_strings.hpp"
+#include "t7_config.hpp"
 
 #include <mouse.h>
 #include <libime.h>
@@ -99,8 +100,6 @@ constexpr uintptr_t kKeyBindings = 0x10;
 constexpr uintptr_t kKeyStride   = 16;
 
 constexpr uintptr_t kController = 0;
-
-static const char kConfigPath[] = "/data/BO3-Customs/kbm.cfg";
 
 constexpr int32_t kCatchMenus       = 0x18;
 constexpr int32_t kCatchLui         = 0x10;
@@ -469,6 +468,7 @@ static void*  g_specialTextOriginal = nullptr;
 
 static bool     g_mouseReady = false;
 static int32_t  g_mouseHandle = -1;
+static bool     g_mouseConnected = false;
 static uint32_t g_mouseButtons = 0;
 static uint32_t g_mouseRetryAt = 0;
 static float    g_lookX = 0.0f;
@@ -977,11 +977,53 @@ static void SettingsSnapshot(char* out, size_t size)
     }
 }
 
+static bool SameTextN(const char* a, const char* b, size_t length)
+{
+    for (size_t i = 0; i < length; ++i)
+    {
+        if (!a[i] || !b[i] || Upper(a[i]) != Upper(b[i]))
+            return false;
+    }
+
+    return true;
+}
+
+static bool KbmOwns(const char* line)
+{
+    while (*line == ' ' || *line == '\t')
+        ++line;
+
+    if (SameTextN(line, "bind", 4) && (line[4] == ' ' || line[4] == '\t'))
+        return true;
+
+    if (!SameTextN(line, "set", 3) || (line[3] != ' ' && line[3] != '\t'))
+        return false;
+
+    const char* name = line + 4;
+
+    while (*name == ' ' || *name == '\t')
+        ++name;
+
+    size_t length = 0;
+
+    while (name[length] && name[length] != ' ' && name[length] != '\t')
+        ++length;
+
+    for (const Setting& setting : k_settings)
+    {
+        if (strlen(setting.key) == length && SameTextN(setting.key, name, length))
+            return true;
+    }
+
+    return false;
+}
+
 static void SaveConfig()
 {
     static char text[8192];
     size_t used = 0;
     char single[2];
+    text[0] = 0;
 
     for (int32_t key = 1; key < 256; ++key)
     {
@@ -1011,13 +1053,9 @@ static void SaveConfig()
         used += (size_t)wrote;
     }
 
-    const int fd = sceKernelOpen(kConfigPath, SCE_KERNEL_O_WRONLY | SCE_KERNEL_O_CREAT | SCE_KERNEL_O_TRUNC, 0777);
-
-    if (fd < 0)
+    if (!T7Config_Save("keyboard and mouse", KbmOwns, text))
         return;
 
-    sceKernelWrite(fd, text, used);
-    sceKernelClose(fd);
     SettingsSnapshot(g_savedSettings, sizeof(g_savedSettings));
 }
 
@@ -1083,29 +1121,13 @@ static void ApplyConfigLine(char* line, bool& anyBind)
 
 static void LoadConfig()
 {
-    const int fd = sceKernelOpen(kConfigPath, SCE_KERNEL_O_RDONLY, 0);
+    static char text[32768];
 
-    if (fd < 0)
+    if (!T7Config_Read(text, sizeof(text)))
     {
         ResetBinds();
         return;
     }
-
-    static char text[16384];
-    size_t used = 0;
-
-    while (used < sizeof(text) - 1)
-    {
-        const int64_t got = sceKernelRead(fd, text + used, sizeof(text) - 1 - used);
-
-        if (got <= 0)
-            break;
-
-        used += (size_t)got;
-    }
-
-    sceKernelClose(fd);
-    text[used] = 0;
 
     memset(g_keyCommand, 0, sizeof(g_keyCommand));
     bool anyBind = false;
@@ -1855,10 +1877,7 @@ static void PollMouse(int32_t lc)
         }
 
         if (handle >= 0)
-        {
             g_mouseHandle = handle;
-            Notify("BO3 Customs: mouse connected");
-        }
 
         return;
     }
@@ -1870,6 +1889,7 @@ static void PollMouse(int32_t lc)
     {
         sceMouseClose(g_mouseHandle);
         g_mouseHandle = -1;
+        g_mouseConnected = false;
         SetMouseButtons(0);
         return;
     }
@@ -1882,6 +1902,15 @@ static void PollMouse(int32_t lc)
         const SceMouseData& record = data[i];
         uint32_t buttons = 0;
         int32_t wheel = 0;
+
+        if (record.connected != g_mouseConnected)
+        {
+            g_mouseConnected = record.connected;
+            Log("mouse %s", record.connected ? "connected" : "removed");
+
+            if (record.connected)
+                Notify("BO3 Customs: mouse connected");
+        }
 
         if (record.connected && (record.buttons & SCE_MOUSE_BUTTON_INTERCEPTED) == 0)
         {

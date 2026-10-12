@@ -25,6 +25,30 @@ public sealed class T7PortContext
 
     public Shaders.T7ShaderCompiler? ShaderCompiler { get; set; }
 
+    public HashSet<string> GameTechsets { get; } = new(StringComparer.Ordinal);
+
+    public HashSet<string> DetachedTechsets { get; } = new(StringComparer.Ordinal);
+
+    public string OutputName(int type, string name)
+    {
+        string ps4 = T7Names.ToPs4(type, name);
+        if (type != T7AssetTypes.TechniqueSet)
+            return ps4;
+        if (GameTechsets.Contains(name))
+            return "," + ps4;
+        return DetachedTechsets.Contains(name) ? T7Names.Detached(ps4) : ps4;
+    }
+
+    private T7ZoneOrigin? _origin;
+
+    public T7ZoneOrigin Origin => _origin ??= T7ZoneOrigin.Detect(Pc);
+
+    private T7TexelDensity? _texelDensity;
+
+    public T7StockImages? StockImages { get; set; }
+
+    public T7TexelDensity TexelDensity => _texelDensity ??= new T7TexelDensity(Pc, ImageStructByName, StockImages);
+
     private Dictionary<string, long>? _imageStructs;
 
     public byte[]? ImageStructByName(string name)
@@ -335,6 +359,14 @@ public static class T7Names
         if (type is T7AssetTypes.TechniqueSet or T7AssetTypes.ComputeShaderSet && TrySplitHash(name, out string stem, out uint hash))
             return $"{stem}#{unchecked(hash - TechsetPlatformDelta):x8}";
         return name;
+    }
+
+    public const string DetachedMark = "~";
+
+    public static string Detached(string name)
+    {
+        int at = name.LastIndexOf('#');
+        return at > 0 ? name[..at] + DetachedMark + name[at..] : name + DetachedMark;
     }
 
     private static bool TrySplitHash(string name, out string stem, out uint hash)

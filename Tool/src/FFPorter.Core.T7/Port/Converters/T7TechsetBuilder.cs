@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Security.Cryptography;
 using System.Text;
 using FFPorter.Core.T7.Harness;
 using FFPorter.Core.T7.Link;
@@ -9,7 +10,16 @@ namespace FFPorter.Core.T7.Port.Converters;
 public static class T7TechsetBuilder
 {
     public const int HeaderSize = 112, PcTechniqueSize = 720, Ps4TechniqueSize = 224, PcPassSize = 88, Ps4PassSize = 104,
-        PcShaderSize = 40, Ps4ShaderSize = 64, PcDeclSize = 120, Ps4DeclSize = 2372, StateSize = 112, PcPasses = 8, Ps4Passes = 2;
+        PcShaderSize = 40, Ps4ShaderSize = 64, PcDeclSize = 120, Ps4DeclSize = 2372, StateSize = 112, PcPasses = 8, Ps4Passes = 2,
+        Ps4LocalShaderSize = 80, Ps4HullShaderSize = 72, TessellatedPipeline = 2, LocalStage = 3, HullStage = 4, DomainStage = 5;
+
+    private const string GameGeometryShader = "4b0a069599eaf9ecb0c74e30";
+
+    private const string InstancedEffectPrefix = "ei/";
+
+    public sealed record TessellationSample(byte[] Local, byte[] Hull, byte[] Domain);
+
+    public static TessellationSample? TessellationTest { get; set; }
 
     private const ulong Inline = ulong.MaxValue, InlineAlias = ulong.MaxValue - 1;
 
@@ -25,6 +35,8 @@ public static class T7TechsetBuilder
 
     private static readonly Dictionary<uint, uint> GbufferDecalStateBits = new() { [0x07104C49] = 0x0FB25649, [0x03104C49] = 0x07105649 };
 
+    public static uint Ps4StateBits(uint bits) => GbufferDecalStateBits.GetValueOrDefault(bits, bits);
+
     private static readonly Dictionary<byte, (string Semantic, int Index)> UsageSemantics = new()
     {
         [0] = ("POSITION", 0), [1] = ("NORMAL", 0), [2] = ("TANGENT", 0), [3] = ("COLOR", 0), [10] = ("TEXCOORD", 0),
@@ -38,11 +50,14 @@ public static class T7TechsetBuilder
         private T7PassTargets? Targets => Stage == "ps" ? T7PassTargets.For(SetName, Technique) : null;
 
         public void Run(T7ShaderCompiler compiler) =>
-            compiler.Compile(Stage, Dxbc, Textures, Samplers, AbsentTextures, T7GlobalsLayout.Kept(SetName, Technique, Stage), Targets);
+            compiler.Compile(Stage, Dxbc, Textures, Samplers, AbsentTextures, T7GlobalsLayout.Kept(SetName, Technique, Stage), Targets, perInstance: DrawnPerInstance(SetName));
 
         public string CacheFolder(T7ShaderCompiler compiler) =>
-            compiler.CacheFolder(Stage, Dxbc, Textures, Samplers, AbsentTextures, T7GlobalsLayout.Kept(SetName, Technique, Stage), Targets);
+            compiler.CacheFolder(Stage, Dxbc, Textures, Samplers, AbsentTextures, T7GlobalsLayout.Kept(SetName, Technique, Stage), Targets, perInstance: DrawnPerInstance(SetName));
     }
+
+    public static bool DrawnPerInstance(string? setName) =>
+        setName != null && setName.AsSpan().TrimStart(',').StartsWith(InstancedEffectPrefix, StringComparison.Ordinal);
 
     public static List<ShaderJob> ShaderJobs(T7PortContext context)
     {
@@ -65,7 +80,7 @@ public static class T7TechsetBuilder
                     if (read.Kind == T7WalkKind.Read && read.Size == HeaderSize && read.At == registration.Header)
                         header = read;
                 }
-                if (header is not T7Walk.Span found || T7TechsetConverter.IsStub(context.Pc.Zone, found))
+                if (header is not T7Walk.Span found || T7TechsetConverter.IsStub(context.Pc.Zone, found) || context.GameTechsets.Contains(registration.Name))
                     continue;
                 try
                 {
@@ -186,7 +201,7 @@ public static class T7TechsetBuilder
             set.Commit();
             _setName = rewrite.Asset.Type == T7AssetTypes.TechniqueSet ? rewrite.Asset.Name : null;
             if (Q(header.FileOffset) == Inline)
-                _setName = RenamedString(name => T7Names.ToPs4(T7AssetTypes.TechniqueSet, name));
+                _setName = RenamedString(name => context.OutputName(T7AssetTypes.TechniqueSet, name));
             for (int t = 0; t < 12; t++)
             {
                 ulong value = Q(header.FileOffset + 16 + 8 * t);
@@ -232,9 +247,7 @@ public static class T7TechsetBuilder
                 T7Walk.Span stateRead = rewrite.Take(StateSize);
                 T7StructBuilder state = rewrite.Rebuild(stateRead, StateSize);
                 state.MoveAll();
-                uint bits = D(stateRead.FileOffset + 8);
-                if (index == 3 && GbufferDecalStateBits.TryGetValue(bits, out uint ps4Bits))
-                    state.U32(8, ps4Bits);
+                state.U32(8, Ps4StateBits(D(stateRead.FileOffset + 8)));
                 state.Commit();
             }
             technique.Commit();
@@ -250,25 +263,40 @@ public static class T7TechsetBuilder
             byte[] args = argCount > 0 && argsPointer != 0 && _pc.TryFollow(pc + 80, out long argsAt)
                 ? _zone.AsSpan((int)argsAt, 16 * argCount).ToArray() : [];
 
-            T7ShaderCompiler.Program? vs = null, psProgram = null;
+            T7ShaderCompiler.Program? vs = null, psProgram = null, local = null, hull = null, domain = null;
+            T7GnmSdk.Tessellation? tessellation = null;
             byte[]? fetch = null, decl = null;
             uint[] usage = [];
             bool[]? kept = null;
+            bool tessellated = false, injected = false;
             if (technique != null)
             {
-                Stage? vsStage = null, psStage = null;
+                Stage? vsStage = null, psStage = null, localStage = null, hullStage = null, domainStage = null;
                 if (PassHasShaders(pc))
                 {
-                    foreach ((int field, string stage) in PassOrder)
-                    {
-                        if (Q(pc + field) != 0 && stage is "vs2" or "hs" or "ds")
-                            throw new InvalidDataException($"{rewrite.Label}: {stage} shaders are not converted yet");
-                    }
+                    bool hasLocal = Q(pc + 48) != 0, hasHull = Q(pc + 56) != 0, hasDomain = Q(pc + 64) != 0;
+                    tessellated = hasLocal && hasHull && hasDomain;
+                    if (!tessellated && (hasLocal || hasHull || hasDomain))
+                        throw new InvalidDataException($"{rewrite.Label}: technique {_technique} has part of a tessellated pass only ({(hasLocal ? "vertex" : "no vertex")}, {(hasHull ? "hull" : "no hull")}, {(hasDomain ? "domain" : "no domain")} shader)");
                     vsStage = StageOf(pc + 24, args, 0);
                     psStage = StageOf(pc + 32, args, 1);
+                    if (tessellated)
+                    {
+                        localStage = StageOf(pc + 48, args, LocalStage, false);
+                        hullStage = StageOf(pc + 56, args, HullStage, false);
+                        domainStage = StageOf(pc + 64, args, DomainStage);
+                    }
+                    else if (TessellationTest is { } sample && vsStage != null && psStage != null)
+                    {
+                        injected = tessellated = true;
+                        localStage = new Stage(sample.Local, null, null, new SortedSet<int>());
+                        hullStage = new Stage(sample.Hull, null, null, new SortedSet<int>());
+                        domainStage = new Stage(sample.Domain, null, null, new SortedSet<int>());
+                    }
                     if (vsStage != null)
                     {
-                        vs = compiler.Compile("vs", vsStage.Dxbc, vsStage.Textures, vsStage.Samplers, vsStage.AbsentTextures, T7GlobalsLayout.Kept(_setName, _technique, "vs"));
+                        vs = compiler.Compile("vs", vsStage.Dxbc, vsStage.Textures, vsStage.Samplers, vsStage.AbsentTextures, T7GlobalsLayout.Kept(_setName, _technique, "vs"),
+                            perInstance: DrawnPerInstance(_setName));
                         fetch = T7GnmSdk.FetchShader(vs.Header);
                         if (Q(pc + 8) != 0 && _pc.TryFollow(pc + 8, out long declAt))
                             decl = Ps4Decl(_zone.AsSpan((int)declAt, PcDeclSize), T7Dxbc.InputSignature(vsStage.Dxbc));
@@ -278,13 +306,40 @@ public static class T7TechsetBuilder
                             T7PassTargets.For(_setName, _technique));
                     if (vs != null && psProgram != null)
                         usage = T7GnmSdk.UsageTable(vs.Header, psProgram.Header);
+                    if (tessellated && localStage != null && hullStage != null && domainStage != null)
+                    {
+                        local = compiler.Compile("ls", localStage.Dxbc, null, null, localStage.AbsentTextures, T7GlobalsLayout.Kept(_setName, _technique, "ls"));
+                        hull = compiler.Compile("hs", hullStage.Dxbc, null, null, hullStage.AbsentTextures, T7GlobalsLayout.Kept(_setName, _technique, "hs"),
+                            link: T7DxbcTranslator.LinkFrom(localStage.Dxbc));
+                        domain = compiler.Compile("ds", domainStage.Dxbc, domainStage.Textures, domainStage.Samplers, domainStage.AbsentTextures,
+                            T7GlobalsLayout.Kept(_setName, _technique, "ds"), link: T7DxbcTranslator.LinkFrom(hullStage.Dxbc));
+                        tessellation = T7GnmSdk.Tessellate(local.Header, hull.Header);
+                        if (!injected)
+                        {
+                            if (Q(pc + 8) != 0 && _pc.TryFollow(pc + 8, out long declAt))
+                                decl = Ps4Decl(_zone.AsSpan((int)declAt, PcDeclSize), T7Dxbc.InputSignature(localStage.Dxbc));
+                            if (psProgram != null)
+                                usage = T7GnmSdk.UsageTable(domain.Header, psProgram.Header);
+                            if (localStage.AbsentTextures.Count + hullStage.AbsentTextures.Count > 0 || ReadsMaterial(localStage.Dxbc) || ReadsMaterial(hullStage.Dxbc))
+                                context.Warn(T7Issues.TessellationUnbound, $"{rewrite.Label}: technique {_technique} reads textures or material values before its domain shader; the PS4 game binds none there, so they read as zero", rewrite.Asset.Name);
+                        }
+                    }
                 }
-                args = Ps4Args(args, vsStage, psStage, out argCount, out kept);
+                args = Ps4Args(args, vsStage, psStage, localStage, hullStage, domainStage, tessellated && !injected, out argCount, out kept);
             }
+
+            if (technique != null && Q(pc + 40) != 0 && _pc.TryFollow(pc + 40, out long geometryAt) && Q(geometryAt + 24) != 0
+                && _pc.TryFollow(geometryAt + 24, out long geometryProgram)
+                && System.Convert.ToHexStringLower(SHA256.HashData(_zone.AsSpan((int)geometryProgram, (int)D(geometryAt + 32))))[..24] != GameGeometryShader)
+                context.Warn(T7Issues.GeometryShaderDropped, $"{rewrite.Label}: technique {_technique} uses a geometry shader, which the PS4 game has no stage for; the pass draws without it", rewrite.Asset.Name);
 
             if (technique != null)
             {
                 technique.Move(pcRelative, ps4, 72).Marker(ps4 + 40, 0);
+                if (tessellated)
+                    technique.U32(ps4, TessellatedPipeline);
+                if (injected)
+                    technique.Marker(ps4 + 48, Inline).Marker(ps4 + 56, Inline).Marker(ps4 + 64, Inline);
                 technique.U32(ps4 + 72, (uint)usage.Length).U32(ps4 + 76, 0).Marker(ps4 + 80, usage.Length > 0 ? Inline : 0);
                 technique.Move(pcRelative + 72, ps4 + 88, 8).U8(ps4 + 88, (byte)argCount);
                 if (argCount == 0)
@@ -295,9 +350,17 @@ public static class T7TechsetBuilder
 
             foreach ((int field, string stage) in PassOrder)
             {
-                if (Q(pc + field) != Inline)
-                    continue;
                 bool emit = technique != null;
+                if (Q(pc + field) != Inline)
+                {
+                    if (injected && stage == "vs2")
+                        Injected(local!, tessellation!.Fetch, "ls", tessellation);
+                    else if (injected && stage == "hs")
+                        Injected(hull!, null, "hs", tessellation);
+                    else if (injected && stage == "ds")
+                        Injected(domain!, null, "", null);
+                    continue;
+                }
                 switch (stage)
                 {
                     case "decl":
@@ -317,6 +380,15 @@ public static class T7TechsetBuilder
                     case "ps":
                         Shader(emit ? psProgram : null, null);
                         break;
+                    case "vs2":
+                        Shader(emit ? local : null, emit ? tessellation?.Fetch : null, "ls", tessellation);
+                        break;
+                    case "hs":
+                        Shader(emit ? hull : null, null, "hs", tessellation);
+                        break;
+                    case "ds":
+                        Shader(emit ? domain : null, null);
+                        break;
                     default:
                         Shader(null, null);
                         break;
@@ -333,7 +405,7 @@ public static class T7TechsetBuilder
                 Arguments(pc, technique != null ? args : null, kept);
         }
 
-        private bool PassHasShaders(long pc) => Q(pc + 24) != 0 || Q(pc + 32) != 0;
+        private bool PassHasShaders(long pc) => Q(pc + 24) != 0 || Q(pc + 32) != 0 || Q(pc + 48) != 0 || Q(pc + 56) != 0 || Q(pc + 64) != 0;
 
         private void Arguments(long pc, byte[]? ps4Args, bool[]? kept)
         {
@@ -367,17 +439,46 @@ public static class T7TechsetBuilder
             }
         }
 
-        private void Shader(T7ShaderCompiler.Program? program, byte[]? fetch)
+        private static int ShaderSize(string stage) => stage switch { "ls" => Ps4LocalShaderSize, "hs" => Ps4HullShaderSize, _ => Ps4ShaderSize };
+
+        private static void ShaderFields(T7StructBuilder shader, string stage, int code, int header, int? fetch, T7GnmSdk.Tessellation? tessellation)
+        {
+            (int codeAt, int headerAt) = stage == "ls" ? (48, 64) : (32, 48);
+            if (stage != "hs")
+                shader.Marker(16, fetch != null ? Inline : 0).U64(24, (ulong)(fetch ?? 0));
+            shader.Marker(codeAt, Inline).U64(codeAt + 8, (ulong)code);
+            shader.Marker(headerAt, Inline);
+            if (stage == "hs")
+                shader.U32(headerAt + 8, (uint)header).U32(60, tessellation!.LocalStride).U32(64, tessellation.Patches).U32(68, tessellation.VgtPrimitives);
+            else
+                shader.U64(headerAt + 8, (ulong)header);
+        }
+
+        private void Injected(T7ShaderCompiler.Program program, byte[]? fetch, string stage, T7GnmSdk.Tessellation? tessellation)
+        {
+            byte[] header = stage == "ls" ? tessellation!.LocalHeader : program.Header;
+            T7StructBuilder shader = rewrite.Insert(ShaderSize(stage));
+            ShaderFields(shader, stage, program.Code.Length, header.Length, fetch?.Length, tessellation);
+            shader.Commit();
+            rewrite.Insert(header);
+            rewrite.Insert(program.Code);
+            if (fetch != null)
+                rewrite.Insert(fetch);
+        }
+
+        private static bool ReadsMaterial(byte[] dxbc) =>
+            T7Dxbc.ConstantBuffers(dxbc)?.FirstOrDefault(b => b.Name == "$Globals")?.Variables.Any(v => v.Used) == true;
+
+        private void Shader(T7ShaderCompiler.Program? program, byte[]? fetch, string stage = "", T7GnmSdk.Tessellation? tessellation = null)
         {
             T7Walk.Span read = rewrite.Take(PcShaderSize);
             long pc = read.FileOffset;
+            byte[]? header = program == null ? null : stage == "ls" ? tessellation!.LocalHeader : program.Header;
             if (program != null)
             {
-                T7StructBuilder shader = rewrite.Rebuild(read, Ps4ShaderSize);
+                T7StructBuilder shader = rewrite.Rebuild(read, ShaderSize(stage));
                 shader.MapSource(0, 0, 1).CarryPointer(0, 0).CarryPointer(8, 8);
-                shader.Marker(16, fetch != null ? Inline : 0).U64(24, (ulong)(fetch?.Length ?? 0));
-                shader.Marker(32, Inline).U64(40, (ulong)program.Code.Length);
-                shader.Marker(48, Inline).U64(56, (ulong)program.Header.Length);
+                ShaderFields(shader, stage, program.Code.Length, header!.Length, fetch?.Length, tessellation);
                 shader.Commit();
             }
             if (Q(pc) == Inline)
@@ -398,14 +499,14 @@ public static class T7TechsetBuilder
                 rewrite.Take(D(pc + 32));
             if (program != null)
             {
-                rewrite.Insert(program.Header);
+                rewrite.Insert(header!);
                 rewrite.Insert(program.Code);
                 if (fetch != null)
                     rewrite.Insert(fetch);
             }
         }
 
-        private Stage? StageOf(long field, byte[] args, int stage)
+        private Stage? StageOf(long field, byte[] args, int stage, bool bound = true)
         {
             if (Q(field) == 0 || !_pc.TryFollow(field, out long shaderAt))
                 return null;
@@ -438,6 +539,11 @@ public static class T7TechsetBuilder
             }
             if (absent.Count > 0)
                 absent.UnionWith(visibleDecals);
+            if (!bound)
+            {
+                absent.UnionWith(resources.Where(r => r.IsTextureRegister).SelectMany(r => Enumerable.Range(r.Bind, r.Count)));
+                return new Stage(dxbc, null, null, absent);
+            }
             return new Stage(dxbc,
                 FreeSlots(resources.Where(r => r.IsTextureRegister).SelectMany(r => Enumerable.Range(r.Bind, r.Count)), materialTextures),
                 FreeSlots(resources.Where(r => r.IsSampler).SelectMany(r => Enumerable.Range(r.Bind, r.Count)), materialSamplers),
@@ -460,7 +566,7 @@ public static class T7TechsetBuilder
             return map;
         }
 
-        private static byte[] Ps4Args(byte[] args, Stage? vs, Stage? ps, out int count, out bool[] kept)
+        private static byte[] Ps4Args(byte[] args, Stage? vs, Stage? ps, Stage? local, Stage? hull, Stage? domain, bool tessellated, out int count, out bool[] kept)
         {
             using var output = new MemoryStream();
             count = 0;
@@ -472,7 +578,9 @@ public static class T7TechsetBuilder
                 int stage = type & 0xFF, kind = type >> 8;
                 if (stage == 2)
                     continue;
-                Stage? owner = stage == 0 ? vs : ps;
+                if (tessellated && (stage is LocalStage or HullStage) && (kind is 2 or 3 or 5 or 6))
+                    continue;
+                Stage? owner = !tessellated ? (stage == 0 ? vs : ps) : stage switch { 0 => vs, 1 => ps, LocalStage => local, HullStage => hull, DomainStage => domain, _ => null };
                 ushort slot = BinaryPrimitives.ReadUInt16LittleEndian(entry.AsSpan(2));
                 uint code = BinaryPrimitives.ReadUInt32LittleEndian(entry.AsSpan(8));
                 if ((kind == KindCodeTexture && owner?.AbsentTextures.Contains(slot) == true) || (kind == KindConstant && Ps4AbsentCodeConstants.Contains(code)))

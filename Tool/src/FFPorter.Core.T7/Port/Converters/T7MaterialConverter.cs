@@ -212,7 +212,7 @@ public sealed class T7MaterialConverter : IT7AssetConverter, IT7NestedConverter
         }
     }
 
-    private static string StageName(int stage) => stage switch { 1 => "vs", 2 => "ps", _ => "" };
+    private static string StageName(int stage) => stage switch { 0 => "ds", 1 => "vs", 2 => "ps", _ => "" };
 
     private static byte[] BufferData(T7PortContext context, string? techset, int technique, int stage, int pass, byte[] pcData, string materialName, long root)
     {
@@ -334,6 +334,8 @@ public sealed class T7MaterialConverter : IT7AssetConverter, IT7NestedConverter
             T7TechsetConverter.ConvertStub(rewrite);
             return;
         }
+        if (T7TechsetConverter.TryReference(context, rewrite))
+            return;
         if (context.ShaderCompiler != null)
         {
             T7TechsetBuilder.Convert(context, rewrite);

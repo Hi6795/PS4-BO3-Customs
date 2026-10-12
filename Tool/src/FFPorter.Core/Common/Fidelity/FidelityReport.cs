@@ -6,6 +6,7 @@ namespace FFPorter.Core.Common.Fidelity;
 public enum FidelityGrade
 {
     Exact,
+    Native,
     Strong,
     Good,
     Approximate,
@@ -19,9 +20,11 @@ public static class FidelityScale
 {
     public static readonly FidelityDimension[] Dimensions = Enum.GetValues<FidelityDimension>();
 
+    public const double Full = 100;
+
     public static double Score(FidelityGrade grade) => grade switch
     {
-        FidelityGrade.Exact => 100,
+        FidelityGrade.Exact or FidelityGrade.Native => Full,
         FidelityGrade.Strong => 90,
         FidelityGrade.Good => 75,
         FidelityGrade.Approximate => 50,
@@ -87,6 +90,7 @@ public sealed class FidelitySnapshot
     public List<FidelityDimensionReport> Dimensions { get; set; } = [];
     public List<FidelityStepReport> Steps { get; set; } = [];
     public double ElapsedSeconds { get; set; }
+    public double? RemainingSeconds { get; set; }
 }
 
 public sealed class FidelityStepReport

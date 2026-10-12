@@ -8,6 +8,7 @@ public sealed unsafe partial class StallWatchdog : IDisposable
 {
     private const uint ThreadAccess = 0x0002 | 0x0008 | 0x0040;
     private const uint ContextFull = 0x0010000B;
+    private static readonly TimeSpan Overslept = TimeSpan.FromSeconds(5);
     private readonly uint _threadId;
     private readonly Thread _thread;
     private readonly TimeSpan _timeout;
@@ -30,7 +31,13 @@ public sealed unsafe partial class StallWatchdog : IDisposable
     {
         while (!_stop)
         {
+            long before = Stopwatch.GetTimestamp();
             Thread.Sleep(1000);
+            if (Stopwatch.GetElapsedTime(before) > Overslept)
+            {
+                Progress();
+                continue;
+            }
             if (Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastTick)) < _timeout)
                 continue;
             nint handle = OpenThread(ThreadAccess, 0, _threadId);

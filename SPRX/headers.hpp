@@ -21,3 +21,5 @@
 #include "t7_lua.hpp"
 #include "t7_kbm.hpp"
 #include "t7_log.hpp"
+#include "t7_share.hpp"
+#include "t7_builtins.hpp"

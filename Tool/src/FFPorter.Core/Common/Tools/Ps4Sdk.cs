@@ -14,18 +14,21 @@ public static class Ps4Sdk
     private const string EncodedImageConverterName = "NSg4Myl3Mzc7PT9oPTQ8dD8iPw==";
     private const string EncodedGnmLibraryName = "NjM4CTk/HTQ3dD42Ng==";
     private const string EncodedGnmxLibraryName = "NjM4CTk/HTQ3InQ+NjY=";
+    private const string EncodedGpuLibraryName = "NjM4CTk/HSovGz4+KD8pKXQ+NjY=";
 
     public static string ShaderCompilerName => DecodeXorBase64(EncodedShaderCompilerName);
     public static string ImageConverterName => DecodeXorBase64(EncodedImageConverterName);
     public static string GnmLibraryName => DecodeXorBase64(EncodedGnmLibraryName);
     public static string GnmxLibraryName => DecodeXorBase64(EncodedGnmxLibraryName);
+    public static string GpuLibraryName => DecodeXorBase64(EncodedGpuLibraryName);
 
     private static readonly string[] EncodedRequiredFiles =
     [
         EncodedShaderCompilerName,
         EncodedImageConverterName,
         EncodedGnmLibraryName,
-        EncodedGnmxLibraryName
+        EncodedGnmxLibraryName,
+        EncodedGpuLibraryName
     ];
 
     private static readonly HttpClient HttpClient = new();
@@ -64,23 +67,35 @@ public static class Ps4Sdk
             "Mi4uKilgdXUpNDMqKXQpMnU8dWo4Kh8/HQ0wEhZ1NHU1KDgzKXctOyw/dyopKTY5dD8iPwU5Mi80MQU4OAVobGhtYmUoZ2s=",
             "Mi4uKilgdXUpNDMqKXQpMnU8dR4sHGkuKhszKGp1NHU1KDgzKXctOyw/dyopKTY5dD8iPwU5Mi80MQU4OQVraWJsamUoZ2s="
         ],
+
         _ when fileName == ImageConverterName =>
         [
             "Mi4uKilgdXUpNDMqKXQpMnU8dQADLSkRLghtFDV1NHU1KDgzKXczNzs9P2g9NDx0PyI/BTkyLzQxBTs7BWtra2tiZShnaw==",
             "Mi4uKilgdXUpNDMqKXQpMnU8dRZsEytsEA0RaAJ1NHU1KDgzKXczNzs9P2g9NDx0PyI/BTkyLzQxBTs4BW9iaG9lKGdr"
         ],
+
         _ when fileName == GnmLibraryName =>
         [
             "Mi4uKilgdXUpNDMqKXQpMnU8dS8zYjciEQ5uEAJ1NHU2MzgJOT8dNDd0PjY2BTkyLzQxBTs7BWliaWtlKGdr",
             "Mi4uKilgdXUpNDMqKXQpMnU8dQw7FDk8ajMqFRV1NHU2MzgJOT8dNDd0PjY2BTkyLzQxBTs4BW9uaGllKGdr",
             "Mi4uKilgdXUpNDMqKXQpMnU8dSNjEg8SYh8FAgN1NHU2MzgJOT8dNDd0PjY2BTkyLzQxBTs5BWhpb2ppZShnaw=="
         ],
+
         _ when fileName == GnmxLibraryName =>
         [
             "Mi4uKilgdXUpNDMqKXQpMnU8dRgRHDcSOTgUICJ1NHU2MzgJOT8dNDcidD42NgU5Mi80MQU7OwVraGhibWUoZ2s=",
             "Mi4uKilgdXUpNDMqKXQpMnU8dW8fAC5vI2poMh51NHU2MzgJOT8dNDcidD42NgU5Mi80MQU7OAVobWttbWUoZ2s="
         ],
-        _ => throw new ArgumentException($"Unknown file: {fileName}", nameof(fileName))
+
+        _ when fileName == GpuLibraryName =>
+        [
+            "Mi4uKilgdXUpNDMqKXQpMnU8dQA5GRIia3dpKRB1NHU2MzgJOT8dKi8bPj4oPykpdD42NgU5Mi80MQU7OwVjbm9sZShnaw==",
+            "Mi4uKilgdXUpNDMqKXQpMnU8dQsrHSg3Lmo1OT11NHU2MzgJOT8dKi8bPj4oPykpdD42NgU5Mi80MQU7OAVraGxra2UoZ2s="
+        ],
+
+        _ => throw new ArgumentException(
+            $"Unknown file: {fileName}",
+            nameof(fileName))
     };
 
     private static string DecodeXorBase64(string encodedData)
@@ -97,13 +112,21 @@ public static class Ps4Sdk
     {
         return Path.Combine(
             AppDomain.CurrentDomain.BaseDirectory,
-            DecodeXorBase64("LTUoMQ=="),
-            DecodeXorBase64("PjsuOw=="),
-            DecodeXorBase64("KTI7Pj8oBTk1NyozNj8o"));
+            "work",
+            "data",
+            "shader_compiler");
     }
 
     private static void ExtractFile(string fileName, string targetDirectory)
     {
+        if (string.IsNullOrWhiteSpace(fileName) ||
+            fileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+        {
+            throw new InvalidDataException(
+                $"Decoded filename is invalid: '{fileName}'. " +
+                "Check the encoded filename constant and XOR key.");
+        }
+
         Directory.CreateDirectory(targetDirectory);
 
         string[] encodedChunkUrls = GetEncodedChunkUrls(fileName);

@@ -11,7 +11,7 @@ public sealed class T7GscBuiltins
     private const int KindPointer = 1, KindCall = 2, KindMethod = 4;
 
     private readonly Dictionary<string, Dictionary<uint, (int Min, int Max)>> _tables = new(StringComparer.Ordinal);
-    private readonly Dictionary<uint, (string Name, string? Ps4, string? Why)> _pcOnly = [];
+    private readonly Dictionary<uint, (string Name, Dictionary<string, (int Min, int Max)> Plugin)> _pcOnly = [];
 
     public static T7GscBuiltins Load(string path)
     {
@@ -26,9 +26,11 @@ public sealed class T7GscBuiltins
         }
         foreach (JsonProperty entry in document.RootElement.GetProperty("pc_only").EnumerateObject())
         {
-            string? ps4 = entry.Value.TryGetProperty("ps4", out JsonElement replacement) ? replacement.GetString() : null;
-            string? why = entry.Value.TryGetProperty("why", out JsonElement reason) ? reason.GetString() : null;
-            builtins._pcOnly[uint.Parse(entry.Name, NumberStyles.HexNumber)] = (entry.Value.GetProperty("name").GetString()!, ps4, why);
+            var plugin = new Dictionary<string, (int, int)>(StringComparer.Ordinal);
+            if (entry.Value.TryGetProperty("plugin", out JsonElement provided))
+                foreach (JsonProperty table in provided.EnumerateObject())
+                    plugin[table.Name] = (table.Value[0].GetInt32(), table.Value[1].GetInt32());
+            builtins._pcOnly[uint.Parse(entry.Name, NumberStyles.HexNumber)] = (entry.Value.GetProperty("name").GetString()!, plugin);
         }
         return builtins;
     }
@@ -87,7 +89,6 @@ public sealed class T7GscBuiltins
             uint function = Read32(buffer, at), space = Read32(buffer, at + 4);
             int references = BinaryPrimitives.ReadUInt16LittleEndian(buffer.AsSpan(at + 8));
             int parameters = buffer[at + 10], flags = buffer[at + 11], kind = flags & 0xF;
-            int entry = at;
             at += 12 + 4 * references;
             if (kind is not (KindPointer or KindCall or KindMethod) || (space is not (BuiltinSpaceA or BuiltinSpaceB) && (flags & 0x20) == 0))
                 continue;
@@ -95,19 +96,12 @@ public sealed class T7GscBuiltins
                 continue;
             if (_pcOnly.TryGetValue(function, out var pcOnly))
             {
-                if (pcOnly.Ps4 == null)
-                {
+                if (Provided(pcOnly.Plugin, side, kind) is not { } provided)
                     errors.Add($"calls {pcOnly.Name}, a builtin only the PC build has");
-                    continue;
-                }
-                uint replacement = Hash(pcOnly.Ps4);
-                if (Find(side, kind, replacement) is not { } range || (kind != KindPointer && (parameters < range.Min || parameters > range.Max)))
-                {
-                    errors.Add($"calls {pcOnly.Name} with {parameters} arguments, which PS4's {pcOnly.Ps4} cannot take");
-                    continue;
-                }
-                BinaryPrimitives.WriteUInt32LittleEndian(buffer.AsSpan(entry), replacement);
-                changes.Add($"{pcOnly.Name} (PC only) now calls {pcOnly.Ps4}" + (pcOnly.Why != null ? $": {pcOnly.Why}" : ""));
+                else if (kind != KindPointer && (parameters < provided.Min || parameters > provided.Max))
+                    errors.Add($"calls {pcOnly.Name} with {parameters} arguments; it takes {provided.Min} to {provided.Max}");
+                else
+                    changes.Add(pcOnly.Name);
                 continue;
             }
             if (kind != KindPointer && Find(side, kind, function) is { } builtin && (parameters < builtin.Min || parameters > builtin.Max))
@@ -129,11 +123,21 @@ public sealed class T7GscBuiltins
 
     private (int Min, int Max)? Find(string side, int kind, uint function)
     {
-        foreach (string table in kind switch { KindPointer => (string[])["function", "method"], KindCall => ["function"], _ => ["method"] })
+        foreach (string table in Tables(kind))
             if (_tables[$"{side}_{table}"].TryGetValue(function, out var range))
                 return range;
         return null;
     }
+
+    private static (int Min, int Max)? Provided(Dictionary<string, (int Min, int Max)> plugin, string side, int kind)
+    {
+        foreach (string table in Tables(kind))
+            if (plugin.TryGetValue($"{side}_{table}", out var range))
+                return range;
+        return null;
+    }
+
+    private static string[] Tables(int kind) => kind switch { KindPointer => ["function", "method"], KindCall => ["function"], _ => ["method"] };
 
     private static uint Read32(byte[] buffer, int at) => BinaryPrimitives.ReadUInt32LittleEndian(buffer.AsSpan(at));
 }

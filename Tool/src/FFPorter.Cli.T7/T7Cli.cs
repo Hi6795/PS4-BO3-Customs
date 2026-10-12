@@ -20,12 +20,19 @@ public static class T7Cli
           convert <pc zone.ff> -o <folder> [--donors <PS4 zone folder>] [--pc-reference <PC BO3 zone folder>] [--ps4-index <PS4 xpak folder>] [--image <dump>]
                   [--force] [--keep-work] [--donor-all] [--no-xpak] [--no-sound] [--no-fd] [--languages en[,fr...]] [--no-shader-compile]
                   [--acts <acts.exe>] [--gsc-recompile] [--no-gsc-check] [--no-bundle-streams] [--no-movies] [--progress]
+                  [--async] [--mod <folder name>] [--tessellation-test <folder>]
                                                  convert a PC map (zones, xpaks, sound banks, usermap movies) for PS4; .fd
                                                  patches beside PC and reference zones are applied first unless --no-fd;
                                                  streamed items the map only references are converted into its xpaks from
                                                  the --pc-reference folder's xpaks unless a PS4 index knows them. Ends with
                                                  the port fidelity table (also written as <map>.fidelity.json); --progress
-                                                 also prints "FFPORTER_FIDELITY {json}" snapshots while it runs (the desktop app)
+                                                 also prints "FFPORTER_FIDELITY {json}" snapshots while it runs (the desktop app);
+                                                 --async runs the steps that do not need each other at the same time (sound
+                                                 banks, shaders, streamed data, movies) with the same output; --mod names the
+                                                 mod a zone belongs to, so mods whose zones share names (core_mod, zm_mod)
+                                                 keep their own work folders and reports; --tessellation-test is a developer
+                                                 check that adds the vs.dxbc, hs.dxbc and ds.dxbc of <folder> to every pass
+                                                 as a tessellated pipeline, so the PS4 loader check covers those records
           movie <video> [-o <out.mkv>]           list what keeps a movie from playing on PS4; with -o write it PS4-ready
                                                  (copied, or re-encoded to H.264 High 1920x1080 30 fps like retail)
           game-zones <pc zone.ff>                the Black Ops III zone folder a conversion of the zone uses (above the zone,
@@ -47,14 +54,18 @@ public static class T7Cli
           xpak-extract <file.xpak> --name <substring> -o <folder>   the stored payload of every matching item
           xpak-compare <converted.xpak> <retail ps4.xpak>   count the catalog items whose keys (content hashes) match retail
           sound-convert <pc .sabl/.sabs> -o <ps4 bank> [--compare <stock ps4 bank>]
-          shader-pssl <program.dxbc> [-o <out.pssl>] [--disassemble] [--technique N [--set <name>]]
+          shader-pssl <program.dxbc> [-o <out.pssl>] [--disassemble] [--technique N [--set <name>]] [--local] [--after <program.dxbc>]
                                                  translate a PC shader program to PSSL (or list its bytecode); with a
-                                                 technique, pixel programs write that pass's PS4 render targets
+                                                 technique, pixel programs write that pass's PS4 render targets; --local
+                                                 makes a vertex program the first stage of a tessellated pass, --after
+                                                 names the program of the stage before a hull or domain program
           shader-check <folder> [--cache <dir>]  translate and compile every <folder>/*/source.dxbc for PS4
         """;
 
     public static int Run(string[] args, TextWriter stdout, TextWriter stderr)
     {
+        stdout = TextWriter.Synchronized(stdout);
+        stderr = TextWriter.Synchronized(stderr);
         if (args.Length == 0 || args[0] is "-h" or "--help")
         {
             stdout.Write(Usage);
@@ -85,6 +96,7 @@ public static class T7Cli
                 "shader-dump" => ShaderDump(options, stdout, stderr),
                 "material-textures" => MaterialTextures(options, stdout),
                 "material-globals" => MaterialGlobals(options, stdout),
+                "fx-elements" => FxElements(options, stdout),
                 "xpak-index" => XPakIndex(options, stdout),
                 "xpak-extract" => XPakExtract(options, stdout),
                 "xpak-convert" => XPakConvert(options, stdout),
@@ -190,7 +202,14 @@ public static class T7Cli
         Workspace workspace = Workspace.Locate(options.Value("--root"));
         string stem = Path.GetFileNameWithoutExtension(input);
         string folder = Path.GetDirectoryName(input)!;
-        string work = Path.Combine(T7Paths.Work(workspace), stem);
+        string? mod = options.Value("--mod");
+        if (options.Value("--tessellation-test") is string samples)
+            FFPorter.Core.T7.Port.Converters.T7TechsetBuilder.TessellationTest = new(File.ReadAllBytes(Path.Combine(samples, "vs.dxbc")),
+                File.ReadAllBytes(Path.Combine(samples, "hs.dxbc")), File.ReadAllBytes(Path.Combine(samples, "ds.dxbc")));
+        if (mod != null && (mod.Trim().Length == 0 || mod.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || mod.Trim('.').Length == 0))
+            throw new ArgumentException($"--mod needs the mod's folder name, not '{mod}'");
+        string prefix = mod == null ? "" : mod + ".";
+        string work = Path.Combine(T7Paths.Work(workspace), prefix + stem);
         string loader = T7Paths.Ps4Loader(workspace);
         string image = options.Value("--image") ?? T7Paths.PcImage(workspace);
         if (!File.Exists(image) && !File.Exists(Path.Combine(image, "segments.json")))
@@ -198,7 +217,7 @@ public static class T7Cli
         if (!File.Exists(Path.Combine(loader, "segments.json")))
             throw new IOException($"The PS4 loader data is missing ({loader})");
         Directory.CreateDirectory(output);
-        var fidelity = new FFPorter.Core.T7.Port.T7Fidelity(stem, options.Flag("--progress")
+        var fidelity = new FFPorter.Core.T7.Port.T7Fidelity(mod == null ? stem : $"{mod} · {stem}", options.Flag("--progress")
             ? snapshot => stdout.WriteLine(FFPorter.Core.Common.Fidelity.FidelityProtocol.Format(snapshot))
             : null);
         fidelity.Prepare();
@@ -286,6 +305,8 @@ public static class T7Cli
             ConvertSound = !options.Flag("--no-sound"),
             ConvertMovies = !options.Flag("--no-movies"),
             ApplyDelta = !options.Flag("--no-fd"),
+            Concurrent = options.Flag("--async"),
+            ReportPrefix = prefix,
             Languages = options.Value("--languages")?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
             ShaderCompiler = compiler,
             Log = stdout.WriteLine,
@@ -335,9 +356,12 @@ public static class T7Cli
         if (options.Flag("--disassemble"))
             text = FFPorter.Core.T7.Shaders.T7DxbcCode.Disassemble(program);
         else
-            text = FFPorter.Core.T7.Shaders.T7DxbcTranslator.Translate(dxbc, program.Stage == 1 ? "vs" : "ps", null, null,
+            text = FFPorter.Core.T7.Shaders.T7DxbcTranslator.Translate(dxbc,
+                FFPorter.Core.T7.Shaders.T7DxbcTranslator.StageOf(dxbc, options.Flag("--local")), null, null,
                 targets: options.Value("--technique") is string technique
-                    ? FFPorter.Core.T7.Shaders.T7PassTargets.For(options.Value("--set"), int.Parse(technique)) : null).Text;
+                    ? FFPorter.Core.T7.Shaders.T7PassTargets.For(options.Value("--set"), int.Parse(technique)) : null,
+                link: options.Value("--after") is string producer
+                    ? FFPorter.Core.T7.Shaders.T7DxbcTranslator.LinkFrom(File.ReadAllBytes(producer)) : null).Text;
         string? output = options.Value("-o");
         if (output != null)
             File.WriteAllText(output, text);
@@ -363,7 +387,7 @@ public static class T7Cli
             string stage;
             try
             {
-                stage = FFPorter.Core.T7.Shaders.T7DxbcCode.Parse(dxbc).Stage == 1 ? "vs" : "ps";
+                stage = FFPorter.Core.T7.Shaders.T7DxbcTranslator.StageOf(dxbc);
                 compiler.Compile(stage, dxbc, null, null);
                 Interlocked.Increment(ref passed);
             }
@@ -450,11 +474,11 @@ public static class T7Cli
 
     private static int XPakCompare(Options options, TextWriter stdout)
     {
-        CompareXPaks(options.Positional(0, "converted.xpak"), options.Positional(1, "retail ps4.xpak"), stdout);
+        CompareXPaks(options.Positional(0, "converted.xpak"), options.Positional(1, "retail ps4.xpak"), stdout, options.Value("--dump"), options.Value("--name"));
         return 0;
     }
 
-    private static void CompareXPaks(string convertedPath, string retailPath, TextWriter stdout)
+    private static void CompareXPaks(string convertedPath, string retailPath, TextWriter stdout, string? dump = null, string? only = null)
     {
         using var retail = new FFPorter.Core.T7.Streams.XPak(retailPath);
         using var converted = new FFPorter.Core.T7.Streams.XPak(convertedPath);
@@ -462,6 +486,7 @@ public static class T7Cli
         foreach ((ulong key, var record) in retail.Index)
             retailById.TryAdd(FFPorter.Core.T7.Streams.T7Ps4StreamIndex.Identity(record), key);
         var stats = new Dictionary<string, int>();
+        var differing = new List<(string Type, string Name, ulong Key, ulong RetailKey)>();
         void Count(string what) => stats[what] = stats.GetValueOrDefault(what) + 1;
         foreach ((ulong key, var record) in converted.Index)
         {
@@ -477,9 +502,35 @@ public static class T7Cli
             Count($"{type} {where}: key {(key == retailKey ? "matches" : "differs")}");
             if (key == retailKey && record.Text != retail.Index[retailKey].Text)
                 Count($"{type} {where}: index text differs");
+            if (stored && retailStored && key != retailKey)
+                differing.Add((type, record.Name ?? "?", key, retailKey));
         }
         foreach ((string what, int count) in stats.OrderBy(p => p.Key))
             stdout.WriteLine($"  vs retail: {what} x{count}");
+        if (dump == null)
+            return;
+        Directory.CreateDirectory(dump);
+        foreach ((string type, string name, ulong key, ulong retailKey) in differing.OrderBy(d => d.Type).ThenBy(d => d.Name))
+        {
+            converted.TryFind(key, out var mineEntry);
+            retail.TryFind(retailKey, out var theirEntry);
+            byte[] mine = converted.ReadPayload(mineEntry), theirs = retail.ReadPayload(theirEntry);
+            int first = -1, count = 0;
+            for (int i = 0; i < Math.Min(mine.Length, theirs.Length); i++)
+            {
+                if (mine[i] == theirs[i])
+                    continue;
+                count++;
+                if (first < 0)
+                    first = i;
+            }
+            stdout.WriteLine($"  {type} {name} {key:x16} vs {retailKey:x16}: {mine.Length} vs {theirs.Length} bytes, {count} differ, first at {first}");
+            if (only != null && !name.Contains(only, StringComparison.OrdinalIgnoreCase))
+                continue;
+            string stem = Path.Combine(dump, $"{type}.{string.Concat(name.Select(c => char.IsLetterOrDigit(c) || c is '_' or '-' ? c : '_'))}.{key:x16}");
+            File.WriteAllBytes(stem + ".ours.bin", mine);
+            File.WriteAllBytes(stem + ".retail.bin", theirs);
+        }
     }
 
     private static int ZoneCompare(Options options, TextWriter stdout, TextWriter stderr)
@@ -963,8 +1014,12 @@ public static class T7Cli
                         long field = read.FileOffset + 16 + 8 * t;
                         if (BitConverter.ToUInt64(data, (int)field) == 0 || !Resolve(field, out long technique))
                             continue;
+                        if (options.Flag("--states") && Resolve(technique + 216, out long state))
+                            stdout.WriteLine($"  t{t} state {System.Convert.ToHexString(data.AsSpan((int)state, 112))}");
                         for (int p = 0; p < 2; p++)
                         {
+                            if (options.Flag("--decls") && Resolve(technique + 8 + 104 * p + 8, out long decl))
+                                stdout.WriteLine($"  t{t} p{p} streams {string.Join(' ', data.AsSpan((int)decl + 1, data[decl]).ToArray())}");
                             foreach ((int offset, string stage) in new[] { (24, "vs"), (32, "ps") })
                             {
                                 if (!Resolve(technique + 8 + 104 * p + offset, out long shader))
@@ -991,6 +1046,11 @@ public static class T7Cli
                                 Directory.CreateDirectory(folder);
                                 File.WriteAllBytes(stem + ".header.bin", data.AsSpan((int)header, (int)headerSize).ToArray());
                                 File.WriteAllBytes(stem + ".code.bin", data.AsSpan((int)code, (int)codeSize).ToArray());
+                                long fetchSize = stage == "vs" ? (long)BitConverter.ToUInt64(data, (int)shader + 24) : 0;
+                                if (fetchSize > 0 && Resolve(shader + 16, out long fetch) && fetch + fetchSize <= data.Length)
+                                    File.WriteAllBytes(stem + ".fetch.bin", data.AsSpan((int)fetch, (int)fetchSize).ToArray());
+                                if (options.Flag("--records"))
+                                    stdout.WriteLine($"  t{t} p{p} {stage} record {System.Convert.ToHexString(data.AsSpan((int)shader, 64))} pass {System.Convert.ToHexString(data.AsSpan((int)(technique + 8 + 104 * p), 104))}");
                                 written++;
                             }
                         }
@@ -1054,6 +1114,117 @@ public static class T7Cli
                     stdout.WriteLine($"    read {read.Kind} {read.Size} at {read.FileOffset} -> {read.At}");
             }
         }
+        return 0;
+    }
+
+    private static int FxElements(Options options, TextWriter stdout)
+    {
+        string zone = Path.GetFullPath(options.Positional(0, "zone.ff"));
+        T7FastFile.Decoded decoded = options.Flag("--apply-fd") ? FFPorter.Core.T7.T7FastFileDelta.LoadPatched(zone) : T7FastFile.Load(zone);
+        var index = new FFPorter.Core.T7.Link.T7WalkIndex("fx", decoded.Zone, T7Walk.Read(options.Required("--walk")));
+        string? wanted = options.Value("--name");
+        bool gpuOnly = options.Flag("--gpu");
+        var sprites = new Dictionary<string, int>(StringComparer.Ordinal);
+        var gpu = new Dictionary<string, int>(StringComparer.Ordinal);
+        int effects = 0, gpuEffects = 0, gpuElements = 0, engineGpu = 0;
+        var fields = new List<string>();
+        foreach (var asset in index.Walk.Assets)
+        {
+            foreach (var registration in asset.Registrations)
+            {
+                if (registration.Type != T7AssetTypes.Fx || registration.Name.StartsWith(','))
+                    continue;
+                long root = -1;
+                foreach (var read in asset.Reads)
+                    if (read.Kind == T7WalkKind.Read && read.At == registration.Header && read.FileOffset < registration.FilePos && read.Size >= 0x28)
+                        root = read.FileOffset;
+                if (root < 0 || !index.TryFollow(root + 0x20, out long elements))
+                    continue;
+                effects++;
+                int looping = BitConverter.ToInt16(index.Zone, (int)root + 12), oneShot = BitConverter.ToInt16(index.Zone, (int)root + 14);
+                bool show = wanted == null ? !gpuOnly : registration.Name.Contains(wanted, StringComparison.OrdinalIgnoreCase);
+                var lines = new List<string>();
+                bool anyGpu = false;
+                for (int e = 0; e < looping + oneShot; e++)
+                {
+                    long element = elements + 608L * e;
+                    byte type = index.Zone[element + 200], count = index.Zone[element + 201];
+                    uint flags = BitConverter.ToUInt32(index.Zone, (int)element), more = BitConverter.ToUInt32(index.Zone, (int)element + 4);
+                    bool onGpu = (more & 0x200) != 0;
+                    var names = new List<string>();
+                    foreach (long at in new[] { element + 240, element + 0x130 })
+                    {
+                        string label = at == element + 240 ? "a" : "b";
+                        if (BitConverter.ToUInt64(index.Zone, (int)at) == 0)
+                            continue;
+                        var slots = new List<long>();
+                        if (count > 1 || type == 13)
+                        {
+                            if (index.TryFollow(at, out long array))
+                                for (int i = 0; i < count; i++)
+                                    slots.Add(array + (type == 13 ? 24 : 64) * i);
+                        }
+                        else
+                        {
+                            slots.Add(at);
+                        }
+                        foreach (long slot in slots)
+                        {
+                            string name = index.TryReferencedName(slot, out int kind, out string referenced) ? $"{T7AssetTypes.Name(kind)}:{referenced}" : $"raw:{BitConverter.ToUInt64(index.Zone, (int)slot):x}";
+                            names.Add($"{label}={name}");
+                            if (type <= 5)
+                            {
+                                sprites[name] = sprites.GetValueOrDefault(name) + 1;
+                                if (onGpu)
+                                    gpu[name] = gpu.GetValueOrDefault(name) + 1;
+                            }
+                        }
+                    }
+                    if (onGpu)
+                    {
+                        anyGpu = true;
+                        gpuElements++;
+                    }
+                    lines.Add($"  element {e}: type {type} visuals {count} flags {flags:x8} {more:x8}{(onGpu ? " gpu" : "")} {string.Join(" ", names)}");
+                    ushort gpuDef = BitConverter.ToUInt16(index.Zone, (int)element + 602);
+                    if (options.Flag("--spawn"))
+                        fields.Add($"{registration.Name}	{e}	{(e < looping ? "loop" : "once")}	{type}	{flags:x8}	{more:x8}	" +
+                            string.Join("	", Enumerable.Range(0, 16).Select(i => BitConverter.ToInt32(index.Zone, (int)element + 8 + 4 * i))));
+                    if (gpuDef != 0xFFFF)
+                    {
+                        engineGpu++;
+                        if (options.Flag("--fields"))
+                            fields.Add($"{registration.Name} element {e} of {looping}+{oneShot}: type {type} flags {flags:x8} {more:x8} gpu def {gpuDef} " +
+                                $"count {BitConverter.ToInt32(index.Zone, (int)element + 8)}+{BitConverter.ToInt32(index.Zone, (int)element + 12)} " +
+                                $"+16..+48 {string.Join(" ", Enumerable.Range(0, 9).Select(i => BitConverter.ToInt32(index.Zone, (int)element + 16 + 4 * i)))} " +
+                                $"+52..+64 {string.Join(" ", Enumerable.Range(0, 4).Select(i => BitConverter.ToInt32(index.Zone, (int)element + 52 + 4 * i)))} " +
+                                $"+502 {BitConverter.ToUInt16(index.Zone, (int)element + 502)} +596..+607 {System.Convert.ToHexString(index.Zone, (int)element + 596, 12)}");
+                    }
+                    if (wanted != null && options.Flag("--raw"))
+                    {
+                        lines.Add($"    at {element}");
+                        foreach (int field in new[] { 208, 216, 224, 232 })
+                            if (index.TryFollow(element + field, out long target))
+                                lines.Add($"    +{field} -> {target}");
+                    }
+                }
+                if (anyGpu)
+                    gpuEffects++;
+                if (show || (gpuOnly && anyGpu && wanted == null))
+                {
+                    stdout.WriteLine($"{registration.Name} ({looping}+{oneShot} elements)");
+                    foreach (string line in lines)
+                        stdout.WriteLine(line);
+                }
+            }
+        }
+        stdout.WriteLine($"{effects} effects, {gpuEffects} with gpu elements ({gpuElements} elements), {sprites.Count} sprite visuals, {gpu.Count} on gpu elements");
+        stdout.WriteLine($"{engineGpu} elements carry a GPU definition index (+602 is not 0xFFFF)");
+        foreach (string line in fields)
+            stdout.WriteLine(line);
+        if (options.Flag("--materials"))
+            foreach (var pair in sprites.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+                stdout.WriteLine($"  {pair.Key} x{pair.Value}{(gpu.ContainsKey(pair.Key) ? " gpu" : "")}");
         return 0;
     }
 

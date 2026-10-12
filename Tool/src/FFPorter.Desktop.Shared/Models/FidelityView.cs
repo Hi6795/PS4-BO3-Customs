@@ -6,8 +6,36 @@ namespace FFPorter.Desktop.Models;
 public sealed class FidelityView : Observable
 {
     private string _map = "", _state = FidelityStates.Running, _stage = "", _detail = "", _headline = "", _grade = "", _percentText = "—", _elapsedText = "";
+    private string _absentSummary = "", _stepSummary = "";
     private double _progress;
-    private bool _hasScore;
+    private bool _hasScore, _hasRunningSteps;
+    private int? _percent;
+    private double? _remaining;
+    private DateTime _remainingAt;
+    private bool _held;
+
+    private const double Kept = 0.5, UnderMinute = 45, MostMinutes = 59.5;
+
+    public double? RemainingSeconds => IsRunning && _remaining is double left ? _held ? left : Math.Max(0, left - (DateTime.UtcNow - _remainingAt).TotalSeconds) : null;
+
+    public void Hold(bool held)
+    {
+        if (held == _held)
+            return;
+        _remaining = RemainingSeconds;
+        _remainingAt = DateTime.UtcNow;
+        _held = held;
+        foreach (StepView step in Steps)
+            step.Hold(held);
+    }
+
+    public static string Remaining(double seconds)
+    {
+        if (seconds < UnderMinute)
+            return "under 1 min left";
+        double minutes = Math.Round(seconds / 60);
+        return minutes <= MostMinutes ? $"about {Math.Max(1, minutes):0} min left" : $"about {Math.Floor(minutes / 60):0}h {minutes % 60:00}m left";
+    }
 
     public FidelityView()
     {
@@ -28,7 +56,12 @@ public sealed class FidelityView : Observable
     public string Headline { get => _headline; private set => Set(ref _headline, value); }
     public string Grade { get => _grade; private set { if (Set(ref _grade, value)) RaiseScore(); } }
     public string PercentText { get => _percentText; private set => Set(ref _percentText, value); }
+    public int? Percent { get => _percent; private set => Set(ref _percent, value); }
     public bool HasScore { get => _hasScore; private set { if (Set(ref _hasScore, value)) RaiseScore(); } }
+    public string AbsentSummary { get => _absentSummary; private set { if (Set(ref _absentSummary, value)) Raise(nameof(HasAbsent)); } }
+    public bool HasAbsent => AbsentSummary.Length > 0;
+    public string StepSummary { get => _stepSummary; private set => Set(ref _stepSummary, value); }
+    public bool HasRunningSteps { get => _hasRunningSteps; private set => Set(ref _hasRunningSteps, value); }
 
     public string ScoreGrade => State is FidelityStates.Running or FidelityStates.Done ? Grade : "";
 
@@ -75,11 +108,22 @@ public sealed class FidelityView : Observable
         Headline = snapshot.Headline;
         Grade = snapshot.Grade ?? "";
         HasScore = snapshot.Percent != null;
+        Percent = snapshot.Percent;
         PercentText = snapshot.Percent is int percent ? $"{percent}%" : "—";
         Progress = snapshot.Progress;
         ElapsedText = Elapsed(snapshot.ElapsedSeconds);
+        if (snapshot.State == FidelityStates.Running && snapshot.RemainingSeconds is double left)
+        {
+            _remaining = RemainingSeconds is double shown ? shown * Kept + left * (1 - Kept) : left;
+            _remainingAt = DateTime.UtcNow;
+        }
+        else
+        {
+            _remaining = null;
+        }
         for (int i = 0; i < Dimensions.Count && i < snapshot.Dimensions.Count; i++)
             Dimensions[i].Update(snapshot.Dimensions[i], snapshot.State);
+        SummarizeAbsent();
         List<FidelityStepReport> steps = snapshot.Steps ?? [];
         if (Steps.Count != steps.Count || Steps.Zip(steps).Any(pair => pair.First.Key != pair.Second.Key || pair.First.Title != pair.Second.Title))
         {
@@ -90,6 +134,7 @@ public sealed class FidelityView : Observable
         }
         for (int i = 0; i < Steps.Count; i++)
             Steps[i].Update(steps[i]);
+        SummarizeSteps();
         if (!Problems.SequenceEqual(snapshot.Problems))
         {
             Problems.Clear();
@@ -103,6 +148,7 @@ public sealed class FidelityView : Observable
     public void Interrupt(string state, string headline, IEnumerable<string>? problems = null)
     {
         State = state;
+        _remaining = null;
         Stage = state == FidelityStates.Cancelled ? "Cancelled" : "Failed";
         Detail = "";
         Headline = headline;
@@ -114,12 +160,39 @@ public sealed class FidelityView : Observable
             Problems.Add(problem);
         Raise(nameof(HasProblems));
         Raise(nameof(ProblemSummary));
+        SummarizeAbsent();
+        SummarizeSteps();
     }
 
     public void Tick()
     {
         foreach (StepView step in Steps)
             step.Tick();
+    }
+
+    private void SummarizeAbsent()
+    {
+        string[] absent = [.. Dimensions.Where(dimension => dimension.IsAbsent).Select(dimension => dimension.Name)];
+        AbsentSummary = absent.Length == 0 ? "" : "Not in this zone: " + string.Join(" · ", absent);
+    }
+
+    private void SummarizeSteps()
+    {
+        int done = Steps.Count(step => step.State is FidelityStepStates.Done or FidelityStepStates.Skipped);
+        int running = Steps.Count(step => step.IsRunning);
+        int failed = Steps.Count(step => step.State == FidelityStepStates.Failed);
+        HasRunningSteps = running > 0;
+        if (Steps.Count == 0)
+        {
+            StepSummary = "";
+            return;
+        }
+        var parts = new List<string> { $"{done} of {Steps.Count} steps done" };
+        if (running > 0)
+            parts.Add($"{running} running");
+        if (failed > 0)
+            parts.Add($"{failed} failed");
+        StepSummary = string.Join(" · ", parts);
     }
 
     internal static string Elapsed(double seconds)
@@ -147,7 +220,8 @@ public sealed class DimensionView : Observable
 
     public string PercentText { get => _percentText; private set => Set(ref _percentText, value); }
     public string Grade { get => _grade; private set => Set(ref _grade, value); }
-    public string GradeLabel { get => _gradeLabel; private set => Set(ref _gradeLabel, value); }
+    public string GradeLabel { get => _gradeLabel; private set { if (Set(ref _gradeLabel, value)) Raise(nameof(IsAbsent)); } }
+    public bool IsAbsent => GradeLabel == "not in map";
     public string Summary { get => _summary; private set { if (Set(ref _summary, value)) Raise(nameof(HasSummary)); } }
     public bool HasSummary => Summary.Length > 0;
     public double ScoreFraction { get => _scoreFraction; private set => Set(ref _scoreFraction, value); }
@@ -186,6 +260,7 @@ public sealed class StepView : Observable
     private string _state = FidelityStepStates.Waiting, _detail = "", _percentText = "", _elapsedText = "";
     private double _progress, _elapsedSeconds;
     private DateTime _seenAt = DateTime.UtcNow;
+    private bool _held;
 
     public StepView(string key, string title)
     {
@@ -196,7 +271,8 @@ public sealed class StepView : Observable
     public string Key { get; }
     public string Title { get; }
 
-    public string State { get => _state; private set { if (Set(ref _state, value)) { Raise(nameof(IsRunning)); Raise(nameof(HasDetail)); } } }
+    public string State { get => _state; private set { if (Set(ref _state, value)) { Raise(nameof(IsRunning)); Raise(nameof(HasDetail)); Raise(nameof(IconState)); } } }
+    public string IconState => State == FidelityStepStates.Waiting ? RunStates.Ready : State;
     public double Progress { get => _progress; private set => Set(ref _progress, value); }
     public string Detail { get => _detail; private set { if (Set(ref _detail, value)) Raise(nameof(HasDetail)); } }
     public string PercentText { get => _percentText; private set => Set(ref _percentText, value); }
@@ -216,8 +292,19 @@ public sealed class StepView : Observable
 
     public void Tick()
     {
-        if (IsRunning)
+        if (IsRunning && !_held)
             Refresh();
+    }
+
+    public void Hold(bool held)
+    {
+        if (held == _held)
+            return;
+        if (IsRunning && held)
+            _elapsedSeconds += (DateTime.UtcNow - _seenAt).TotalSeconds;
+        _seenAt = DateTime.UtcNow;
+        _held = held;
+        Refresh();
     }
 
     public void Settle(string state)
@@ -236,7 +323,7 @@ public sealed class StepView : Observable
 
     private void Refresh()
     {
-        double seconds = IsRunning ? _elapsedSeconds + (DateTime.UtcNow - _seenAt).TotalSeconds : _elapsedSeconds;
+        double seconds = IsRunning && !_held ? _elapsedSeconds + (DateTime.UtcNow - _seenAt).TotalSeconds : _elapsedSeconds;
         PercentText = IsRunning ? $"{Math.Floor(Progress * 100):0}%" : "";
         ElapsedText = State is FidelityStepStates.Waiting or FidelityStepStates.Skipped ? "" : FidelityView.Elapsed(seconds);
     }

@@ -6,10 +6,18 @@
     <AssemblyName>PS4 .FF Porter</AssemblyName>
     <Product>PS4 .FF Porter</Product>
     <AssemblyTitle>PS4 .FF Porter - Black Ops III</AssemblyTitle>
+    <Company>ItsJokerZz</Company>
+    <Authors>ItsJokerZz</Authors>
+    <Copyright>GPLv3+ &#169; 2026 ItsJokerZz</Copyright>
     <RootNamespace>FFPorter.Desktop</RootNamespace>
     <StartupObject>FFPorter.Desktop.Program</StartupObject>
     <CETCompat>false</CETCompat>
+    <ApplicationIcon>..\FFPorter.Desktop.Shared\Theme\app.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
+  <ItemGroup>
+    <AssemblyMetadata Include="Built" Value="$([System.DateTime]::UtcNow.ToString('o'))" />
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\FFPorter.Desktop.Shared\FFPorter.Desktop.Shared.csproj" />
     <ProjectReference Include="..\FFPorter.Cli.T7\FFPorter.Cli.T7.csproj" />

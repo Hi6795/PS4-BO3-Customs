@@ -25,6 +25,15 @@
     <ClCompile Include="t7_log.cpp">
       <Filter>Source</Filter>
     </ClCompile>
+    <ClCompile Include="t7_config.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClCompile Include="t7_share.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClCompile Include="t7_builtins.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
     <ClCompile Include="t7_mapimages.cpp">
       <Filter>Source</Filter>
     </ClCompile>
@@ -64,6 +73,18 @@
       <Filter>Headers</Filter>
     </ClInclude>
     <ClInclude Include="t7_log.hpp">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="t7_config.hpp">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="t7_share.hpp">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="t7_builtins.hpp">
+      <Filter>Headers</Filter>
+    </ClInclude>
+    <ClInclude Include="t7_share_lua.hpp">
       <Filter>Headers</Filter>
     </ClInclude>
     <ClInclude Include="t7_mapimages.hpp">

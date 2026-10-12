@@ -78,10 +78,11 @@ public sealed class T7MiscConverter : IT7AssetConverter, IT7NestedConverter
         if (context.GscBuiltins != null)
         {
             IReadOnlyList<string> changes = context.GscBuiltins.Apply(converted, rewrite.Asset.Name ?? "script", context.ScriptExports);
-            foreach (string change in changes)
-                context.Log($"script '{rewrite.Asset.Name}': {change}");
             if (changes.Count > 0)
-                context.Fidelity?.Raise(T7Issues.BuiltinRewritten, $"{rewrite.Asset.Name}: {changes[0]}");
+            {
+                context.Log($"script '{rewrite.Asset.Name}': calls {string.Join(", ", changes)}, PC-only builtins the BO3-Customs plugin provides");
+                context.Fidelity?.Raise(T7Issues.BuiltinProvided, $"{rewrite.Asset.Name}: {string.Join(", ", changes)}");
+            }
         }
         if (context.Acts != null)
             converted = ActsPass(context, rewrite.Asset.Name ?? "script", converted);

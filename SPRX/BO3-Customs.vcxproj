@@ -22,6 +22,9 @@
     <ClCompile Include="t7_lua.cpp" />
     <ClCompile Include="t7_kbm.cpp" />
     <ClCompile Include="t7_log.cpp" />
+    <ClCompile Include="t7_config.cpp" />
+    <ClCompile Include="t7_share.cpp" />
+    <ClCompile Include="t7_builtins.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="headers.hpp" />
@@ -37,6 +40,10 @@
     <ClInclude Include="t7_kbm.hpp" />
     <ClInclude Include="t7_kbm_strings.hpp" />
     <ClInclude Include="t7_log.hpp" />
+    <ClInclude Include="t7_config.hpp" />
+    <ClInclude Include="t7_share.hpp" />
+    <ClInclude Include="t7_builtins.hpp" />
+    <ClInclude Include="t7_share_lua.hpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCTargetsPath Condition="'$(VCTargetsPath12)' != '' and '$(VSVersion)' == '' and '$(VisualStudioVersion)' == ''">$(VCTargetsPath12)</VCTargetsPath>
@@ -86,7 +93,7 @@
       <CppLanguageStd>Cpp20</CppLanguageStd>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>libkernel_stub_weak.a;libkernel_gen_stub_weak.a;libkernel_unity_stub_weak.a;libSceSysmodule_stub_weak.a;libSceMouse_stub_weak.a;libSceUserService_stub_weak.a;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libkernel_stub_weak.a;libkernel_gen_stub_weak.a;libkernel_unity_stub_weak.a;libSceSysmodule_stub_weak.a;libSceMouse_stub_weak.a;libSceUserService_stub_weak.a;libSceNet_stub_weak.a;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <InfoStripping>StripSymsAndDebug</InfoStripping>
     </Link>
@@ -106,7 +113,7 @@ del "$(ProjectDir)$(TargetName).prx.down"</Command>
       <CppLanguageStd>Cpp20</CppLanguageStd>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>libkernel_stub_weak.a;libkernel_gen_stub_weak.a;libSceSysmodule_stub_weak.a;libSceMouse_stub_weak.a;libSceUserService_stub_weak.a;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libkernel_stub_weak.a;libkernel_gen_stub_weak.a;libSceSysmodule_stub_weak.a;libSceMouse_stub_weak.a;libSceUserService_stub_weak.a;libSceNet_stub_weak.a;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <InfoStripping>StripSymsAndDebug</InfoStripping>
     </Link>

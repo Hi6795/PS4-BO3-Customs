@@ -29,6 +29,8 @@ public sealed class T7ZonePortOptions
 
     public Streams.T7PcStreamSource? PcStreamSource { get; init; }
 
+    public T7StockImages? StockImages { get; init; }
+
     public IReadOnlyDictionary<string, string>? SoundRenames { get; init; }
 
     public IReadOnlySet<uint>? StreamedSounds { get; init; }
@@ -47,6 +49,8 @@ public sealed class T7ZonePortOptions
     public Shaders.T7ShaderCompiler? ShaderCompiler { get; init; }
 
     public T7Fidelity? Fidelity { get; init; }
+
+    public string? ReportName { get; init; }
 }
 
 public sealed record T7ZonePortResult(bool Success, string OutputFastFile, IReadOnlyList<string> Problems, IReadOnlyDictionary<string, int> Strategies);
@@ -72,6 +76,7 @@ public static class T7ZonePort
         private readonly Action<string> _log = options.Log;
         private readonly T7Fidelity? _fidelity = options.Fidelity;
         private readonly string _stem = Path.GetFileNameWithoutExtension(options.PcFastFile), _zoneFile = Path.GetFileName(options.PcFastFile);
+        private readonly string _report = options.ReportName ?? Path.GetFileNameWithoutExtension(options.PcFastFile);
         private readonly Dictionary<string, int> _strategies = [];
         private T7FastFile.Decoded? _decoded;
         private T7PortContext? _context;
@@ -160,6 +165,7 @@ public static class T7ZonePort
             context.ShaderLibrary = options.ShaderLibrary;
             context.ShaderLibrary?.AddZone(pc);
             context.ShaderCompiler = options.ShaderCompiler;
+            context.StockImages = options.StockImages;
             string opcodeMap = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(options.Ps4LoaderDirectory))!, "t7_gsc", "gsc_opcodes.json");
             if (File.Exists(opcodeMap))
                 context.Gsc = Scripts.T7Gsc.Load(opcodeMap);
@@ -176,6 +182,19 @@ public static class T7ZonePort
                 builder.NullFields.UnionWith(fallout.NullFields.Select(f => (pc, f)));
                 _log($"[{_stem}] texturecombo '{fallout.Asset.Name}': {fallout.SubAssets.Count} sub-assets; " + string.Join(", ", fallout.Counts.OrderBy(p => p.Key).Select(p => $"{p.Key} x{p.Value}")));
             }
+            if (options.ShaderLibrary is { } library)
+            {
+                context.GameTechsets.UnionWith(GameTechsets(pc, library, _stem, out List<string> shared));
+                context.DetachedTechsets.UnionWith(shared);
+                builder.OutputName = context.OutputName;
+                if (context.GameTechsets.Count > 0)
+                    _log($"[{_stem}] {context.GameTechsets.Count} technique sets are the game's own (core zones); they are referenced, not rebuilt");
+                if (shared.Count > 0)
+                    _log($"[{_stem}] {shared.Count} more of the game's technique sets share data with sets built here; they are rebuilt under their own names ({string.Join(", ", shared)})");
+            }
+            T7ZoneOrigin origin = context.Origin;
+            if (origin.IsPs4)
+                _log($"[{_stem}] the zone's own data is in PS4 layout ({origin.TiledImages} image parts at their PS4 size, {origin.LinearImages} at the PC size); it is kept as it is");
             _decoded = decoded;
             _context = context;
             _converters = converters;
@@ -344,7 +363,7 @@ public static class T7ZonePort
             }
             foreach (string warning in context.Warnings.Take(40))
                 _log($"[{_stem}] warning: {warning}");
-            string problemReport = Workspace.ReportPath(_stem, ".problems.txt");
+            string problemReport = Workspace.ReportPath(_report, ".problems.txt");
             File.Delete(problemReport);
             if (problems.Count > 0)
             {
@@ -381,7 +400,7 @@ public static class T7ZonePort
             T7WalkIndex pc = context.Pc;
             T7FastFile.Decoded decoded = _decoded;
             T7OutputAsset?[] outputs = _outputs;
-            string problemReport = Workspace.ReportPath(_stem, ".problems.txt");
+            string problemReport = Workspace.ReportPath(_report, ".problems.txt");
             _fidelity?.Enter(T7Fidelity.ZonePhase(options.PcFastFile, "link"), "Linking and checking", $"{_zoneFile} with the PS4 game's loader");
             var linker = new T7Linker(options.Ps4LoaderDirectory, options.WorkDirectory, _log)
             {
@@ -411,7 +430,7 @@ public static class T7ZonePort
                 problems.Add($"{staleKeys} PC stream keys are still in the zone (their items changed on PS4; the owning assets' converters must write the PS4 keys)");
             if (problems.Count > 0)
                 ReportProblems(_fidelity, _stem, problems, $"{_zoneFile} was written but failed {problems.Count} checks");
-            string report = Workspace.ReportPath(_stem, ".port.json");
+            string report = Workspace.ReportPath(_report, ".port.json");
             File.WriteAllText(report, JsonSerializer.Serialize(new
             {
                 source = options.PcFastFile,
@@ -446,6 +465,62 @@ public static class T7ZonePort
             _outputs = [];
             _shaderJobs = null;
         }
+    }
+
+    private static HashSet<string> GameTechsets(T7WalkIndex pc, T7PcShaderLibrary library, string stem, out List<string> shared)
+    {
+        shared = [];
+        IReadOnlySet<string> loaded = T7PcShaderLibrary.AlwaysLoadedBefore(stem);
+        var sets = new List<(string Name, long Start, long End)>();
+        foreach (T7Walk.Asset asset in pc.Walk.Assets)
+        {
+            foreach (T7Walk.Registration registration in asset.Registrations)
+            {
+                if (registration.Type != T7AssetTypes.TechniqueSet || string.IsNullOrEmpty(registration.Name))
+                    continue;
+                T7Walk.Span? header = null;
+                foreach (T7Walk.Span read in asset.Reads)
+                {
+                    if (read.FileOffset >= registration.FilePos)
+                        break;
+                    if (read.Kind == T7WalkKind.Read && read.Size == T7TechsetConverter.HeaderSize && read.At == registration.Header)
+                        header = read;
+                }
+                if (header is T7Walk.Span found && T7TechsetConverter.CanReference(pc.Zone, found) && library.DefinedIn(registration.Name, loaded))
+                    sets.Add((registration.Name, found.FileOffset, registration.FilePos));
+            }
+        }
+        var chosen = new HashSet<string>(sets.Select(set => set.Name), StringComparer.Ordinal);
+        if (chosen.Count == 0)
+            return chosen;
+        sets.Sort((a, b) => a.Start.CompareTo(b.Start));
+        long[] starts = [.. sets.Select(set => set.Start)];
+        int SetAt(long offset)
+        {
+            int at = Array.BinarySearch(starts, offset);
+            if (at < 0)
+                at = ~at - 1;
+            return at >= 0 && offset < sets[at].End ? at : -1;
+        }
+        for (bool changed = true; changed;)
+        {
+            changed = false;
+            foreach ((long field, (T7PointerKind kind, T7BlockAddress target)) in pc.Pointers)
+            {
+                if (kind != T7PointerKind.Packed || !pc.TryFileOffset(target, out long offset, field))
+                    continue;
+                int into = SetAt(offset);
+                if (into < 0 || offset == sets[into].Start || !chosen.Contains(sets[into].Name))
+                    continue;
+                int from = SetAt(field);
+                if (from == into || (from >= 0 && chosen.Contains(sets[from].Name)))
+                    continue;
+                chosen.Remove(sets[into].Name);
+                shared.Add(sets[into].Name);
+                changed = true;
+            }
+        }
+        return chosen;
     }
 
     private static T7Walk? ReadReusedWalk(string path)
@@ -549,7 +624,11 @@ public static class T7ZonePort
                 T7ImageConverter.ConvertImage(context, rewrite);
                 break;
             case T7AssetTypes.TechniqueSet:
-                if (T7TechsetConverter.IsStub(context.Pc.Zone, rewrite.Peek()) || context.ShaderCompiler == null)
+                if (T7TechsetConverter.IsStub(context.Pc.Zone, rewrite.Peek()))
+                    T7TechsetConverter.ConvertStub(rewrite);
+                else if (T7TechsetConverter.TryReference(context, rewrite, subAsset.EndRead))
+                    break;
+                else if (context.ShaderCompiler == null)
                     T7TechsetConverter.ConvertStub(rewrite);
                 else
                     T7TechsetBuilder.Convert(context, rewrite);

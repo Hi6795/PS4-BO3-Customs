@@ -1,6 +1,8 @@
 #include "headers.hpp"
 #include "t7_lua.hpp"
 #include "t7_maps.hpp"
+#include "t7_config.hpp"
+#include "t7_share_lua.hpp"
 
 namespace T7Lua
 {
@@ -16,6 +18,7 @@ constexpr uintptr_t kDvarFind        = 0xFB6ED0;
 constexpr uintptr_t kDvarString      = 0xFB69C0;
 constexpr uintptr_t kDvarSetByName   = 0xFBC5A0;
 constexpr uintptr_t kFindXAsset      = 0x8591B0;
+constexpr uintptr_t kLuiAddMenu      = 0x11CDD10;
 constexpr uintptr_t kFrameLimitSkip  = 0xF0BBF3;
 constexpr uintptr_t kSplitNarrow     = 0x6FD736;
 constexpr uintptr_t kSplitLayouts    = 0x16094F0;
@@ -81,6 +84,19 @@ static const char k_mouseProbeLua[] =
     "if rawget(_G, 'BO3CustomsMouse') ~= nil or engine == nil or type(rawget(_G, 'LUI')) ~= 'table' then return end\n"
     "engine.SetDvar('bo3customs_mouse_pending', 1)\n";
 
+static const char k_modsDataProbeLua[] =
+    "local engine = rawget(_G, 'Engine')\n"
+    "if engine ~= nil and rawget(_G, 'BO3CustomMods') == nil then engine.SetDvar('bo3customs_mods_data', 1) end\n";
+
+static const char k_modsProbeLua[] =
+    "local engine = rawget(_G, 'Engine')\n"
+    "local cod = rawget(_G, 'CoD')\n"
+    "if rawget(_G, 'BO3CustomsModsUI') ~= nil or engine == nil or type(cod) ~= 'table' then return end\n"
+    "local lobby = rawget(cod, 'LobbyMenus')\n"
+    "if type(lobby) ~= 'table' or type(rawget(lobby, 'AddButtonsForTarget')) ~= 'function' then return end\n"
+    "if rawget(_G, 'DataSources') == nil or rawget(_G, 'DataSourceHelpers') == nil then return end\n"
+    "engine.SetDvar('bo3customs_mods_pending', 1)\n";
+
 static const char k_refreshedLua[] =
     "local tabs = rawget(_G, 'BO3CustomsMapTabs')\n"
     "if tabs ~= nil and tabs.Refreshed ~= nil then tabs.Refreshed() end\n";
@@ -88,6 +104,23 @@ static const char k_refreshedLua[] =
 static const char k_tickLua[] =
     "local tick = rawget(_G, 'BO3CustomsTick')\n"
     "if tick ~= nil then tick() end\n";
+
+#ifdef _DEBUG
+static const char k_logFlushLua[] =
+    "local tabs = rawget(_G, 'BO3CustomsMapTabs')\n"
+    "local logs = type(tabs) == 'table' and tabs.logs or nil\n"
+    "if type(logs) ~= 'table' or #logs == 0 then return end\n"
+    "local take = {}\n"
+    "local size = 0\n"
+    "while #logs > 0 and #take < 12 do\n"
+    "  local line = string.gsub(tostring(logs[1]), '[%c\"]', ' ')\n"
+    "  if #take > 0 and size + #line > 600 then break end\n"
+    "  take[#take + 1] = line\n"
+    "  size = size + #line + 1\n"
+    "  table.remove(logs, 1)\n"
+    "end\n"
+    "Engine.SetDvar('bo3customs_log', table.concat(take, '\\n'))\n";
+#endif
 
 static const char k_menuWatchLua[] =
     "local G = _G\n"
@@ -238,13 +271,26 @@ static const char k_globalAliasLua[] =
     "  if ok and type(map) == 'string' and map ~= '' and map ~= 'core_frontend' then return map end\n"
     "  return nil\n"
     "end\n"
-    "local function usermaps()\n"
-    "  if level() ~= nil then return 'usermaps' end\n"
-    "  return ''\n"
+    "local function active()\n"
+    "  local mod = rawget(G, 'BO3CustomsActiveMod')\n"
+    "  if type(mod) == 'table' then return mod end\n"
+    "  return nil\n"
     "end\n"
-    "local mods = { Mods_IsUsingMods = function() return level() ~= nil end,\n"
-    "  Mods_UsingModsUgcName = usermaps,\n"
-    "  Mods_UsingModsInternalName = usermaps,\n"
+    "local function modName(key)\n"
+    "  return function()\n"
+    "    local mod = active()\n"
+    "    if mod ~= nil and type(mod[key]) == 'string' and mod[key] ~= '' then return mod[key] end\n"
+    "    if level() ~= nil then return 'usermaps' end\n"
+    "    return ''\n"
+    "  end\n"
+    "end\n"
+    "local function chosen()\n"
+    "  local name = rawget(G, 'BO3CustomsChosenMod')\n"
+    "  return type(name) == 'string' and name ~= ''\n"
+    "end\n"
+    "local mods = { Mods_IsUsingMods = function() return active() ~= nil or level() ~= nil or chosen() end,\n"
+    "  Mods_UsingModsUgcName = modName('ugc'),\n"
+    "  Mods_UsingModsInternalName = modName('internal'),\n"
     "  Mods_UsingModsVersion = function() return 0 end,\n"
     "  Mods_IsUsingUsermap = function() return level() ~= nil end,\n"
     "  Mods_UsingUsermapUgcName = function() return level() or '' end }\n"
@@ -262,9 +308,12 @@ static const char k_zombieSeedLua[] =
 
 static uintptr_t g_base = 0;
 static uint32_t  g_ticks = 0;
+static bool      g_forceInject = false;
 static uintptr_t g_pcUtilState = 0;
 static uintptr_t g_mouseState = 0;
 
+static Detour g_addMenuDetour{};
+static void*  g_addMenuOriginal = nullptr;
 static Detour g_findAssetDetour{};
 static void*  g_findAssetOriginal = nullptr;
 
@@ -345,9 +394,8 @@ static bool InMenus()
     return !T7Maps_InLevel();
 }
 
-static bool RunLua(const char* source, const char* chunk)
+static bool RunLuaOn(uintptr_t L, const char* source, const char* chunk)
 {
-    const uintptr_t L = *(const uintptr_t*)(g_base + kLuaState);
     const uintptr_t global = L ? *(const uintptr_t*)(L + kStateGlobal) : 0;
 
     if (!L || !global || !source)
@@ -389,6 +437,11 @@ static bool RunLua(const char* source, const char* chunk)
     return true;
 }
 
+static bool RunLua(const char* source, const char* chunk)
+{
+    return RunLuaOn(*(const uintptr_t*)(g_base + kLuaState), source, chunk);
+}
+
 static char* ReadScript(const char* name)
 {
     char path[256];
@@ -425,6 +478,199 @@ static char* ReadScript(const char* name)
     return text;
 }
 
+static void AppendQuoted(char* out, size_t size, size_t* used, const char* text)
+{
+    if (*used + 3 >= size)
+        return;
+
+    out[(*used)++] = '"';
+
+    for (const unsigned char* c = (const unsigned char*)text; *c && *used + 4 < size; ++c)
+    {
+        if (*c == '"' || *c == '\\')
+            out[(*used)++] = '\\';
+
+        if (*c >= 0x20)
+            out[(*used)++] = (char)*c;
+    }
+
+    out[(*used)++] = '"';
+    out[*used] = 0;
+}
+
+static void ReportUninstall(const char* map, bool removed, const char* message)
+{
+    char lua[1024];
+    size_t used = (size_t)snprintf(lua, sizeof(lua), "%s",
+                                   "local tabs = rawget(_G, 'BO3CustomsMapTabs')\n"
+                                   "if tabs ~= nil and tabs.Uninstalled ~= nil then tabs.Uninstalled(");
+    AppendQuoted(lua, sizeof(lua), &used, map);
+    used += (size_t)snprintf(lua + used, sizeof(lua) - used, ", %s, ", removed ? "true" : "false");
+    AppendQuoted(lua, sizeof(lua), &used, message);
+    snprintf(lua + used, sizeof(lua) - used, ") end\n");
+    RunLua(lua, "=bo3customs_uninstalled");
+}
+
+static void HandleUninstall()
+{
+    char finished[64];
+    char message[192];
+    const int result = T7Maps_UninstallResult(finished, sizeof(finished), message, sizeof(message));
+
+    if (result >= 0)
+    {
+        if (T7Maps_Refresh())
+            RunLua(T7Maps_CustomMapsLua(), "=bo3customs_maps");
+
+        ReportUninstall(finished, result == 1, message);
+        RunLua(k_refreshedLua, "=bo3customs_refreshed");
+    }
+
+    const uintptr_t dvar = FindDvar("bo3customs_uninstall");
+    const char* const wanted = dvar ? DvarText(dvar) : nullptr;
+
+    if (wanted && wanted[0] && strcmp(wanted, "0") != 0)
+    {
+        char map[64];
+        snprintf(map, sizeof(map), "%s", wanted);
+        SetDvar("bo3customs_uninstall", "");
+
+        if (!T7Maps_Uninstall(map, message, sizeof(message)))
+            ReportUninstall(map, false, message);
+    }
+}
+
+static void ReportModChoice(const char* name, int state, const char* message)
+{
+    char lua[1536];
+    size_t used = (size_t)snprintf(lua, sizeof(lua), "%s",
+                                   "local ui = rawget(_G, 'BO3CustomsModsUI')\n"
+                                   "if ui ~= nil and ui.Applied ~= nil then ui.Applied(");
+    AppendQuoted(lua, sizeof(lua), &used, name);
+    used += (size_t)snprintf(lua + used, sizeof(lua) - used, ", %d, ", state);
+    AppendQuoted(lua, sizeof(lua), &used, message);
+    snprintf(lua + used, sizeof(lua) - used, ") end\n");
+    RunLua(lua, "=bo3customs_mod_applied");
+}
+
+static void HandleModChoice()
+{
+    const uintptr_t dvar = FindDvar("bo3customs_mod");
+    const char* const wanted = dvar ? DvarText(dvar) : nullptr;
+
+    if (!wanted || !wanted[0] || strcmp(wanted, "0") == 0)
+        return;
+
+    char name[512];
+    char message[320];
+    snprintf(name, sizeof(name), "%s", wanted);
+    SetDvar("bo3customs_mod", "");
+
+    const int state = T7Maps_SelectMod(name, message, sizeof(message));
+
+    if (state >= 0)
+        T7Maps_RequestPrefetch();
+
+    RunLua(T7Maps_ModsLua(), "=bo3customs_mods");
+    ReportModChoice(name, state, message);
+}
+
+static void HandleModApply()
+{
+    if (!DvarOn("bo3customs_mods_apply"))
+        return;
+
+    SetDvar("bo3customs_mods_apply", "0");
+    T7Maps_RequestApply();
+}
+
+#ifdef _DEBUG
+static void FlushLuaLog()
+{
+    if (!RunLua(k_logFlushLua, "=bo3customs_logflush"))
+        return;
+
+    const uintptr_t dvar = FindDvar("bo3customs_log");
+    const char* const text = dvar ? DvarText(dvar) : nullptr;
+
+    if (!text || !text[0])
+        return;
+
+    char lines[1024];
+    snprintf(lines, sizeof(lines), "%s", text);
+    SetDvar("bo3customs_log", "");
+
+    char* rest = lines;
+
+    while (rest && *rest)
+    {
+        char* const end = strchr(rest, '\n');
+
+        if (end)
+            *end = 0;
+
+        if (*rest)
+            T7Log_Write("[MapSelect] %s", rest);
+
+        rest = end ? end + 1 : nullptr;
+    }
+}
+#endif
+
+static void ShowShare()
+{
+    static bool shown = false;
+
+    T7ShareStatus status;
+    const bool visible = T7Share_Status(&status);
+
+    if ((!visible && !shown) || !UiUp() || !UiTryLock())
+        return;
+
+    if (UiUp())
+    {
+        if (DvarOn("bo3customs_share_cancel"))
+        {
+            SetDvar("bo3customs_share_cancel", "0");
+            T7Share_Cancel();
+        }
+
+        if (!visible)
+        {
+            RunLua(k_shareHideLua, "=bo3customs_share_hide");
+            shown = false;
+        }
+        else
+        {
+            RunLua(k_shareProbeLua, "=bo3customs_share_probe");
+
+            if (DvarOn("bo3customs_share_pending"))
+            {
+                SetDvar("bo3customs_share_pending", "0");
+                RunLua(k_shareUiLua, "=bo3customs_share_ui");
+            }
+
+            char lua[1280];
+            size_t used = (size_t)snprintf(lua, sizeof(lua), "%s",
+                                           "local share = rawget(_G, 'BO3CustomsShare')\n"
+                                           "if share ~= nil and share.Show ~= nil then share.Show(");
+
+            for (const char* const text : { status.title, status.name, status.detail, status.file })
+            {
+                AppendQuoted(lua, sizeof(lua), &used, text);
+                used += (size_t)snprintf(lua + used, sizeof(lua) - used, ", ");
+            }
+
+            used += (size_t)snprintf(lua + used, sizeof(lua) - used, "%d / 1000, ", (int)(status.fraction * 1000.0f));
+            AppendQuoted(lua, sizeof(lua), &used, status.failed ? "" : "Press Circle to cancel and leave the lobby");
+            snprintf(lua + used, sizeof(lua) - used, ") end\n");
+            shown = RunLua(lua, "=bo3customs_share_show") || shown;
+        }
+    }
+
+    UiUnlock();
+}
+
 static void InjectScripts()
 {
     if (!UiUp() || !UiTryLock())
@@ -459,7 +705,19 @@ static void InjectScripts()
             }
         }
 
+        if (T7Share_TakeMapsChanged())
+        {
+            RunLua(T7Maps_CustomMapsLua(), "=bo3customs_maps");
+            RunLua(k_refreshedLua, "=bo3customs_refreshed");
+        }
+
+        HandleUninstall();
+        HandleModChoice();
+        HandleModApply();
         RunLua(k_tickLua, "=bo3customs_tick");
+#ifdef _DEBUG
+        FlushLuaLog();
+#endif
     }
 
     UiUnlock();
@@ -498,31 +756,47 @@ constexpr int kGraphicsCount = sizeof(k_graphicsDvars) / sizeof(k_graphicsDvars[
 static char g_graphics[kGraphicsCount][32] = {};
 static bool g_graphicsLoaded = false;
 
-static void GraphicsPath(char* out, size_t size)
+static const char* GraphicsName(const char* line)
 {
-    snprintf(out, size, "%s/graphics.cfg", "/data/BO3-Customs");
+    while (*line == ' ' || *line == '\t')
+        ++line;
+
+    if ((line[0] == 's' || line[0] == 'S') && (line[1] == 'e' || line[1] == 'E') && (line[2] == 't' || line[2] == 'T') &&
+        (line[3] == ' ' || line[3] == '\t'))
+    {
+        line += 4;
+
+        while (*line == ' ' || *line == '\t')
+            ++line;
+    }
+
+    return line;
+}
+
+static bool GraphicsOwns(const char* line)
+{
+    const char* const name = GraphicsName(line);
+
+    for (int i = 0; i < kGraphicsCount; ++i)
+    {
+        const size_t length = strlen(k_graphicsDvars[i]);
+
+        if (strncmp(name, k_graphicsDvars[i], length) == 0 &&
+            (name[length] == ' ' || name[length] == '\t' || !name[length]))
+            return true;
+    }
+
+    return false;
 }
 
 static void LoadGraphics()
 {
     g_graphicsLoaded = true;
 
-    char path[256];
-    GraphicsPath(path, sizeof(path));
+    static char text[32768];
 
-    const int fd = sceKernelOpen(path, SCE_KERNEL_O_RDONLY, 0);
-
-    if (fd < 0)
+    if (!T7Config_Read(text, sizeof(text)))
         return;
-
-    char text[2048];
-    const int64_t got = sceKernelRead(fd, text, sizeof(text) - 1);
-    sceKernelClose(fd);
-
-    if (got <= 0)
-        return;
-
-    text[got] = 0;
 
     for (char* line = text; line && *line;)
     {
@@ -531,9 +805,10 @@ static void LoadGraphics()
         if (next)
             *next++ = 0;
 
-        char* const space = strchr(line, ' ');
+        char* const name = (char*)GraphicsName(line);
+        char* const space = strchr(name, ' ');
 
-        if (space && line[0] != '/')
+        if (space && name[0] != '/')
         {
             *space = 0;
             char* const value = space + 1;
@@ -544,7 +819,7 @@ static void LoadGraphics()
 
             for (int i = 0; i < kGraphicsCount; ++i)
             {
-                if (strcmp(line, k_graphicsDvars[i]) == 0)
+                if (strcmp(name, k_graphicsDvars[i]) == 0)
                     snprintf(g_graphics[i], sizeof(g_graphics[i]), "%s", value);
             }
         }
@@ -555,35 +830,20 @@ static void LoadGraphics()
 
 static void SaveGraphics()
 {
-    char path[256];
-    char temp[270];
-    GraphicsPath(path, sizeof(path));
-    snprintf(temp, sizeof(temp), "%s.tmp", path);
-
     char text[2048];
     int n = 0;
+    text[0] = 0;
 
     for (int i = 0; i < kGraphicsCount && n >= 0 && (size_t)n < sizeof(text); ++i)
     {
         if (g_graphics[i][0])
-            n += snprintf(text + n, sizeof(text) - (size_t)n, "%s %s\n", k_graphicsDvars[i], g_graphics[i]);
+            n += snprintf(text + n, sizeof(text) - (size_t)n, "set %s %s\n", k_graphicsDvars[i], g_graphics[i]);
     }
 
     if (n <= 0 || (size_t)n >= sizeof(text))
         return;
 
-    sceKernelMkdir("/data/BO3-Customs", 0777);
-
-    const int fd = sceKernelOpen(temp, SCE_KERNEL_O_WRONLY | SCE_KERNEL_O_CREAT | SCE_KERNEL_O_TRUNC, 0777);
-
-    if (fd < 0)
-        return;
-
-    const int64_t put = sceKernelWrite(fd, text, (size_t)n);
-    sceKernelClose(fd);
-
-    if (put != n || sceKernelRename(temp, path) < 0)
-        sceKernelUnlink(temp);
+    T7Config_Save("graphics", GraphicsOwns, text);
 }
 
 static const uint8_t k_frameLimitSkip[] = { 0x84, 0xC0, 0x74, 0x20, 0xB8, 0xE8, 0x03, 0x00, 0x00 };
@@ -883,6 +1143,9 @@ static void PollGraphics()
 static LuiFile g_luiFiles[] =
 {
     { "ui/t7/utility/pcutility.lua", nullptr, 0, false },
+    { "ui/uieditor/menus/mods/menumodsload.lua", nullptr, 0, false },
+    { "ui/uieditor/widgets/mods/widgetmodsload.lua", nullptr, 0, false },
+    { "ui/uieditor/widgets/mods/entrymodsload.lua", nullptr, 0, false },
 };
 
 static RawFileAsset g_luiAssets[sizeof(g_luiFiles) / sizeof(g_luiFiles[0])] = {};
@@ -894,8 +1157,13 @@ static const RawFileAsset* LuiFileFor(const char* name)
     for (size_t i = 0; i < kLuiFileCount; ++i)
     {
         LuiFile& file = g_luiFiles[i];
+        size_t at = 0;
 
-        if (strcmp(name, file.asset) != 0)
+        while (name[at] && file.asset[at] &&
+               (name[at] == file.asset[at] || ((name[at] | 0x20) == file.asset[at] && name[at] >= 'A' && name[at] <= 'Z')))
+            ++at;
+
+        if (name[at] != 0 || file.asset[at] != 0)
             continue;
 
         if (!file.tried)
@@ -984,6 +1252,37 @@ static uint64_t FindXAsset(uint64_t type, uint64_t name, uint64_t a3, uint64_t a
     return result;
 }
 
+static void AddPcUtil();
+
+static uint64_t AddMenu_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
+                          double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
+{
+    const char* const menu = (const char*)a2;
+
+    if (menu && RangeReadable(a2, 5) && strcmp(menu, "main") == 0 && InMenus())
+    {
+        T7Maps_MenusBuilt();
+        g_forceInject = true;
+        AddPcUtil();
+        InjectScripts();
+        g_forceInject = false;
+    }
+
+    return ((Passthrough_t)g_addMenuOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
+}
+
+static void HookAddMenu()
+{
+    static const uint8_t k_addMenu[] = { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53, 0x48,
+                                         0x83, 0xEC, 0x70 };
+
+    if (!g_base || !RangeReadable(g_base + kLuiAddMenu, sizeof(k_addMenu)) ||
+        memcmp((const void*)(g_base + kLuiAddMenu), k_addMenu, sizeof(k_addMenu)) != 0)
+        return;
+
+    Detour_Attach(&g_addMenuDetour, (uint64_t)(g_base + kLuiAddMenu), (void*)AddMenu_h, &g_addMenuOriginal);
+}
+
 static void HookFindXAsset()
 {
     static const uint8_t k_findXAsset[] = { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
@@ -1001,7 +1300,7 @@ static void AddPcUtil()
     const uintptr_t L = g_base != 0 ? *(const uintptr_t*)(g_base + kLuaState) : 0;
     const bool fresh = L != g_pcUtilState;
 
-    if (L == 0 || (!fresh && (g_ticks % 6) != 0) || !UiUp() || !UiTryLock())
+    if (L == 0 || (!fresh && !g_forceInject && (g_ticks % 6) != 0) || !UiUp() || !UiTryLock())
         return;
 
     if (UiUp())
@@ -1073,6 +1372,29 @@ static void AddPcUtil()
 
             T7Log_Write("[Lua] our scripts went into the UI state for %s", (const char*)(g_base + kCurrentMap));
         }
+
+        RunLua(k_modsDataProbeLua, "=bo3customs_mods_data_probe");
+
+        if (DvarOn("bo3customs_mods_data") || T7Maps_ModsChanged())
+        {
+            SetDvar("bo3customs_mods_data", "0");
+            RunLua(T7Maps_ModsLua(), "=bo3customs_mods");
+        }
+
+        RunLua(k_modsProbeLua, "=bo3customs_mods_probe");
+
+        if (DvarOn("bo3customs_mods_pending"))
+        {
+            SetDvar("bo3customs_mods_pending", "0");
+
+            char* const script = ReadScript("mods.lua");
+
+            if (script)
+            {
+                RunLua(script, "@ui_scripts/mods.lua");
+                free(script);
+            }
+        }
     }
 
     UiUnlock();
@@ -1099,6 +1421,7 @@ void T7Lua_Install(uintptr_t base)
     g_base = base;
 
     HookFindXAsset();
+    HookAddMenu();
     PatchFrameLimit();
     PatchSplitScreen();
     HookView();
@@ -1114,6 +1437,9 @@ void T7Lua_Tick()
     ++g_ticks;
 
     AddPcUtil();
+
+    if ((g_ticks % 15) == 0)
+        ShowShare();
 
     if ((g_ticks % 30) != 0)
         return;
@@ -1133,6 +1459,41 @@ bool T7Lua_MouseReady()
 
     const uintptr_t L = *(const uintptr_t*)(g_base + kLuaState);
     return L != 0 && L == g_mouseState;
+}
+
+bool T7Lua_DvarString(const char* name, char* out, size_t size)
+{
+    using namespace T7Lua;
+
+    if (!out || !size)
+        return false;
+
+    out[0] = 0;
+
+    if (!g_base || !name)
+        return false;
+
+    const uintptr_t dvar = FindDvar(name);
+    const char* const text = dvar ? DvarText(dvar) : nullptr;
+
+    if (!text)
+        return false;
+
+    snprintf(out, size, "%s", text);
+    return true;
+}
+
+bool T7Lua_IsUiState(uintptr_t L)
+{
+    return T7Lua::g_base && L == *(const uintptr_t*)(T7Lua::g_base + T7Lua::kLuaState);
+}
+
+void T7Lua_RunShareVm(uintptr_t L)
+{
+    using namespace T7Lua;
+
+    if (g_base && L)
+        RunLuaOn(L, k_shareVmLua, "=bo3customs_share_vm");
 }
 
 bool T7Lua_RunOnTop(uintptr_t L, const char* source, const char* chunk)

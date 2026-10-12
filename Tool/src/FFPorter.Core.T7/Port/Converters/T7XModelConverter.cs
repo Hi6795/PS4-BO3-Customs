@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using FFPorter.Core.T7.Formats;
 using FFPorter.Core.T7.Harness;
 using FFPorter.Core.T7.Link;
 using FFPorter.Core.T7.Streams;
@@ -94,19 +95,9 @@ public sealed class T7XModelConverter : IT7AssetConverter, IT7StreamPlanner, IT7
         }
     }
 
-    public static uint RepackUnitVector(uint value)
-    {
-        int x = (int)(value & 0x3FF) - 512, y = (int)((value >> 10) & 0x3FF) - 512, z = (int)((value >> 20) & 0x3FF) - 512;
-        double length = Math.Sqrt((double)x * x + (double)y * y + (double)z * z);
-        int Component(int c)
-        {
-            double s = length > 0 ? Math.Round(c / length * 511.0, MidpointRounding.ToEven) : c;
-            return Math.Clamp((int)s, -511, 511);
-        }
-        return (value & 0xC0000000) | ((uint)(Component(x) & 0x3FF)) | ((uint)(Component(y) & 0x3FF) << 10) | ((uint)(Component(z) & 0x3FF) << 20);
-    }
+    private static readonly int[] UnitVectorFields = [8, 12];
 
-    public static void RepackPayload(Span<byte> payload, ReadOnlySpan<byte> shared)
+    private static (uint First, uint Count) VertexRecords(ReadOnlySpan<byte> payload, ReadOnlySpan<byte> shared)
     {
         uint vertexCount = BinaryPrimitives.ReadUInt32LittleEndian(shared[4..]);
         uint size = BinaryPrimitives.ReadUInt32LittleEndian(shared[0x18..]);
@@ -115,12 +106,29 @@ public sealed class T7XModelConverter : IT7AssetConverter, IT7StreamPlanner, IT7
             throw new InvalidDataException($"mesh payload is {payload.Length} bytes, its shared record says {size}");
         if (vertexOffset + (long)vertexCount * VertexRecordSize > payload.Length)
             throw new InvalidDataException("mesh vertex records run past the payload");
-        for (long i = 0; i < vertexCount; i++)
-        {
-            int at = (int)(vertexOffset + i * VertexRecordSize + 8);
-            BinaryPrimitives.WriteUInt32LittleEndian(payload[at..], RepackUnitVector(BinaryPrimitives.ReadUInt32LittleEndian(payload[at..])));
-            BinaryPrimitives.WriteUInt32LittleEndian(payload[(at + 4)..], RepackUnitVector(BinaryPrimitives.ReadUInt32LittleEndian(payload[(at + 4)..])));
-        }
+        return (vertexOffset, vertexCount);
+    }
+
+    public static T7NormalForm RepackPayload(Span<byte> payload, ReadOnlySpan<byte> shared, bool ps4Zone = false)
+    {
+        (uint first, uint count) = VertexRecords(payload, shared);
+        T7NormalForm form = T7PackedNormals.Classify(payload, first, VertexRecordSize, count, UnitVectorFields, ps4Zone);
+        T7PackedNormals.Convert(payload, first, VertexRecordSize, count, UnitVectorFields, form);
+        return form;
+    }
+
+    public static bool TryRestorePayload(Span<byte> payload, ReadOnlySpan<byte> shared, ulong key)
+    {
+        (uint first, uint count) = VertexRecords(payload, shared);
+        int tag = (int)(key >> 61);
+        if (XPak.ComputeKey(payload, tag) == key)
+            return false;
+        byte[] restored = payload.ToArray();
+        T7PackedNormals.Convert(restored, first, VertexRecordSize, count, UnitVectorFields, T7NormalForm.Ps4AsPc);
+        if (XPak.ComputeKey(restored, tag) != key)
+            return false;
+        restored.CopyTo(payload);
+        return true;
     }
 
     private sealed class Traversal(T7PortContext context, T7Walk.Asset asset, T7AssetRewrite? rewrite, T7StreamPlan? plan, int start = 0)
@@ -236,7 +244,9 @@ public sealed class T7XModelConverter : IT7AssetConverter, IT7StreamPlanner, IT7
                     if (payload != null)
                     {
                         payload.MoveAll();
-                        RepackPayload(payload.Data, _zone.AsSpan((int)shared, SharedSize));
+                        T7NormalForm form = RepackPayload(payload.Data, _zone.AsSpan((int)shared, SharedSize), context.Origin.IsPs4);
+                        if (form != T7NormalForm.Pc)
+                            context.Fidelity?.Raise(form == T7NormalForm.Ps4 ? T7Issues.MeshAlreadyPs4 : T7Issues.MeshNormalsRestored, shared.ToString());
                         payload.Commit();
                     }
                 }
@@ -248,6 +258,7 @@ public sealed class T7XModelConverter : IT7AssetConverter, IT7StreamPlanner, IT7
         {
             List<string> warnings = context.Warnings;
             T7Fidelity? fidelity = context.Fidelity;
+            bool ps4Zone = context.Origin.IsPs4;
             List<(uint LogicalOffset, byte[] Bytes)> Repack(XPakIndexRecord? record, List<(uint LogicalOffset, byte[] Bytes)> parts)
             {
                 int total = parts.Sum(p => p.Bytes.Length);
@@ -264,10 +275,11 @@ public sealed class T7XModelConverter : IT7AssetConverter, IT7StreamPlanner, IT7
                     bytes.CopyTo(payload, offset);
                     offset += bytes.Length;
                 }
-                RepackPayload(payload, shared);
+                if (!TryRestorePayload(payload, shared, record?.Key ?? key))
+                    RepackPayload(payload, shared, ps4Zone);
                 return [(parts[0].LogicalOffset, payload)];
             }
-            string signature = "xmodelmesh-normals-1:" + Convert.ToHexString(shared);
+            string signature = $"xmodelmesh-normals-2{(ps4Zone ? "p" : "")}:" + Convert.ToHexString(shared);
             plan!.Register(key, Repack, signature);
             plan.RegisterNamed("mesh", asset.Name, BinaryPrimitives.ReadUInt32LittleEndian(shared.AsSpan(0x18)), Repack, signature);
         }
@@ -309,9 +321,10 @@ public sealed class T7XModelConverter : IT7AssetConverter, IT7StreamPlanner, IT7
                 {
                     long entry = materials + 24 * s;
                     int count = U16(entry);
+                    long pointers = -1;
                     if (Q(entry + 8) != 0)
                     {
-                        long pointers = Copy("material pointers", 8L * count);
+                        pointers = Copy("material pointers", 8L * count);
                         for (int m = 0; m < count && pointers >= 0; m++)
                         {
                             if (Q(pointers + 8 * m) >= InlineAlias)
@@ -324,13 +337,21 @@ public sealed class T7XModelConverter : IT7AssetConverter, IT7StreamPlanner, IT7
                         if (density != null)
                         {
                             density.MoveAll();
-                            context.Fidelity?.Raise(T7Issues.TexelDensityScale);
-                            for (int m = 0; m < count; m++)
+                            bool kept = context.Origin.IsPs4;
+                            context.Fidelity?.Raise(kept ? T7Issues.TexelDensityKept : T7Issues.TexelDensityScale);
+                            int unruled = 0;
+                            for (int m = 0; m < count && !kept; m++)
                             {
                                 float value = BinaryPrimitives.ReadSingleLittleEndian(density.Data.AsSpan(4 * m));
-                                if (value != 0)
-                                    BinaryPrimitives.WriteSingleLittleEndian(density.Data.AsSpan(4 * m), value * TexelDensityScale);
+                                if (value == 0)
+                                    continue;
+                                float? scale = pointers >= 0 ? context.TexelDensity.Of(pointers + 8 * m) : null;
+                                if (scale == null)
+                                    unruled++;
+                                BinaryPrimitives.WriteSingleLittleEndian(density.Data.AsSpan(4 * m), value * (scale ?? TexelDensityScale));
                             }
+                            if (unruled > 0)
+                                context.Fidelity?.Raise(T7Issues.TexelDensityFixed, asset.Name, unruled);
                             density.Commit();
                         }
                     }

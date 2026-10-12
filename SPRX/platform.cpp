@@ -34,11 +34,22 @@ namespace {
     using SendNotification_t = int (*)(int, void*, size_t, int);
     SendNotification_t g_sendNotification = nullptr;
     bool g_notificationReady = false;
+
+    constexpr int kSinkNone = 0;
+    constexpr int kSinkPs5 = 1;
+    constexpr int kSinkPs4 = 2;
+    constexpr int kKernelLogText = 7;
+    constexpr size_t kKernelLogChunk = 900;
+    constexpr uintptr_t kKernelSpan = 32u * 1024 * 1024;
+
+    int g_ps5 = -1;
+    int g_sink = -1;
 }
 
 extern "C" {
     int sceKernelSendNotificationRequest(int device, void* request, size_t size, int block);
     int mdbg_service(int command, void* arg1, void* arg2);
+    const char* sceKernelGetFsSandboxRandomWord();
 }
 
 uint64_t GetBaseAddress() {
@@ -195,4 +206,105 @@ void Notify(const char* fmt, ...) {
         g_sendNotification(0, &request, sizeof(request), 0);
     else
         sceKernelSendNotificationRequest(0, &request, sizeof(request), 0);
+}
+
+bool IsPs5() {
+    if (g_ps5 >= 0)
+        return g_ps5 == 1;
+
+    SceKernelStat st;
+    const char* const word = sceKernelGetFsSandboxRandomWord();
+    bool found = false;
+
+    if (word && word[0]) {
+        char path[160];
+        snprintf(path, sizeof(path), "/%s/common/lib/libSceNotification.sprx", word);
+        found = sceKernelStat(path, &st) == 0;
+    }
+
+    if (!found)
+        found = sceKernelStat("/system/common/lib/libSceNotification.sprx", &st) == 0;
+
+    g_ps5 = found ? 1 : 0;
+    return found;
+}
+
+static uintptr_t ImportAddress(uintptr_t import, uintptr_t ownStart, uintptr_t ownEnd) {
+    if (import >= ownStart && import + 6 <= ownEnd) {
+        const uint8_t* const stub = (const uint8_t*)import;
+
+        if (stub[0] != 0xFF || stub[1] != 0x25)
+            return 0;
+
+        import = *(const uintptr_t*)(import + 6 + (intptr_t)*(const int32_t*)(stub + 2));
+    }
+
+    return (import >= ownStart && import < ownEnd) ? 0 : import;
+}
+
+static bool KernelLogBound() {
+    SceKernelVirtualQueryInfo info;
+
+    if (sceKernelVirtualQuery((void*)&KernelLogBound, 0, &info, sizeof(info)) < 0)
+        return false;
+
+    const uintptr_t start = (uintptr_t)info.start;
+    const uintptr_t end = (uintptr_t)info.end;
+    const uintptr_t log = ImportAddress((uintptr_t)&mdbg_service, start, end);
+    const uintptr_t kernel = ImportAddress((uintptr_t)&sceKernelUsleep, start, end);
+
+    return log && kernel && (log > kernel ? log - kernel : kernel - log) < kKernelSpan;
+}
+
+static int Sink() {
+    if (g_sink >= 0)
+        return g_sink;
+
+    int sink = kSinkNone;
+
+    if (IsPs5()) {
+        if (KernelLogBound())
+            sink = kSinkPs5;
+    } else {
+        void* address = nullptr;
+
+        if (sceKernelDlsym(0x2001, "sceKernelDebugOutText", &address) == 0 && address) {
+            sceKernelDebugOutText = (sceKernelDebugOutText_t)address;
+            sink = kSinkPs4;
+        }
+    }
+
+    g_sink = sink;
+    return sink;
+}
+
+const char* DebugSink() {
+    const int sink = Sink();
+    return sink == kSinkPs5 ? "the PS5 kernel log" : sink == kSinkPs4 ? "the PS4 debug output" : nullptr;
+}
+
+void DebugOut(const char* text) {
+    if (!text || !text[0])
+        return;
+
+    const int sink = Sink();
+
+    if (sink == kSinkNone)
+        return;
+
+    for (size_t left = strlen(text); left;) {
+        const size_t take = left < kKernelLogChunk ? left : kKernelLogChunk;
+        char line[kKernelLogChunk + 32];
+
+        snprintf(line, sizeof(line), "%s[BO3-Customs] %.*s%s", sink == kSinkPs5 ? "<118>" : "", (int)take, text,
+                 text[take - 1] == '\n' ? "" : "\n");
+
+        if (sink == kSinkPs5)
+            mdbg_service(kKernelLogText, line, nullptr);
+        else
+            sceKernelDebugOutText(0, line);
+
+        text += take;
+        left -= take;
+    }
 }
