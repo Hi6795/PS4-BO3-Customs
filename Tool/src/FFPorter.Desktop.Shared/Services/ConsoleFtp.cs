@@ -338,7 +338,15 @@ public sealed class ConsoleFtp : IAsyncDisposable
                 progress.Report(new DownloadProgress(DownloadProgress.Sending, "putting the files in place", 1));
                 foreach ((_, string name, _, string mark) in files)
                 {
-                    await ftp.MoveAsync($"{remote}/{name}{Staged}", $"{remote}/{name}");
+                    string from = $"{remote}/{name}{Staged}", to = $"{remote}/{name}";
+                    if (!await ftp.MoveAsync(from, to, false))
+                    {
+                        await ftp.DisposeAsync();
+                        ftp = await ConnectAsync(host, port, Reach, CancellationToken.None);
+                        await ftp.RequireAsync("TYPE I", 200, CancellationToken.None);
+                        await ftp.AskAsync("DELE " + to, Answer, CancellationToken.None);
+                        await ftp.MoveAsync(from, to, true);
+                    }
                     staged.Remove(mark);
                 }
                 return confirmed;
@@ -597,20 +605,17 @@ public sealed class ConsoleFtp : IAsyncDisposable
         return -1;
     }
 
-    private async Task MoveAsync(string from, string to)
+    private async Task<bool> MoveAsync(string from, string to, bool required)
     {
-        for (int attempt = 0; ; attempt++)
-        {
-            (int code, string text) = await AskAsync("RNFR " + from, Answer, CancellationToken.None);
-            if (code != 350)
-                throw Unexpected($"putting {Path.GetFileName(to)} in place", code, text);
-            (code, text) = await AskAsync("RNTO " + to, Answer, CancellationToken.None);
-            if (code is 250 or 200)
-                return;
-            if (attempt > 0)
-                throw Unexpected($"putting {Path.GetFileName(to)} in place", code, text);
-            await AskAsync("DELE " + to, Answer, CancellationToken.None);
-        }
+        (int code, string text) = await AskAsync("RNFR " + from, Answer, CancellationToken.None);
+        if (code != 350)
+            throw Unexpected($"putting {Path.GetFileName(to)} in place", code, text);
+        (code, text) = await AskAsync("RNTO " + to, Answer, CancellationToken.None);
+        if (code / 100 == 2)
+            return true;
+        if (required)
+            throw Unexpected($"putting {Path.GetFileName(to)} in place", code, text);
+        return false;
     }
 
     private async Task RequireAsync(string command, int expected, CancellationToken token)
