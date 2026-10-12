@@ -50,6 +50,14 @@ Maps and mods can also sit on a USB drive or extended storage, in a `BO3-Customs
 When you join a LAN game and do not have the host's map or mods, the SPRX downloads them from the host and then loads you in.
 Both consoles need this SPRX and must be on the same network. Circle cancels the download; the next join carries on from there.
 
+## Found a problem?
+
+[Open an issue](../../issues) and provide `/data/BO3-Customs/log.txt` from your console.
+Grab it before you start the game again: every launch starts a new log.
+
+Also attach the tool's log for the map that causes the issue: press **Log** in the tool, then **Save**.
+If the tool was closed since, its logs are in `work\analysis\gui_logs` beside the tool.
+
 ## Console Layout
 ```text
 /data/BO3-Customs/
