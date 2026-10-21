@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <UseWPF>true</UseWPF>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <AssemblyName>FFPorter.Checks</AssemblyName>
+    <RootNamespace>FFPorter.Checks</RootNamespace>
+    <IsPublishable>false</IsPublishable>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="shaders\*.dxbc" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\FFPorter.Desktop.T7\FFPorter.Desktop.T7.csproj" />
+  </ItemGroup>
+</Project>

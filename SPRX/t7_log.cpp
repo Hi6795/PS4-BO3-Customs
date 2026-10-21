@@ -11,9 +11,11 @@ constexpr uintptr_t kLuaState     = 0xE9831D0;
 constexpr uintptr_t kScriptError  = 0x77F080;
 constexpr uintptr_t kScrVmPub     = 0x3448A80;
 constexpr uintptr_t kErrorDialog  = 0xEF26E0;
+constexpr uintptr_t kScriptImport = 0x76EB10;
 constexpr uintptr_t kDefaultEntry = 0x858060;
 constexpr uintptr_t kReadName     = 0x57E79A0;
 constexpr uintptr_t kAssetEntries = 0x587E710;
+constexpr uintptr_t kAssetPools   = 0x37C83F0;
 constexpr uintptr_t kExitLevel    = 0xA5CEF0;
 constexpr uintptr_t kMapBuiltin   = 0xA6C080;
 constexpr uintptr_t kCbufAddText  = 0xEE44C0;
@@ -45,6 +47,8 @@ constexpr uint32_t kConstsMax          = 8192;
 constexpr uint32_t kSharedHashFiles    = 3;
 constexpr int      kWriterWindow       = 24;
 constexpr int      kFunctionDepth      = 48;
+constexpr size_t   kQueueBytes         = 128 * 1024;
+constexpr unsigned kWriterEveryUs      = 200000;
 
 constexpr uint8_t kOpGetField     = 0;
 constexpr uint8_t kOpCallI        = 2;
@@ -75,6 +79,8 @@ static const uint8_t k_scriptError[] = { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x4
                                          0x53, 0x48, 0x81, 0xEC, 0x88, 0x00, 0x00, 0x00, 0x4C, 0x8B, 0x3D };
 static const uint8_t k_errorDialog[] = { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53, 0x49,
                                          0x89, 0xF7, 0x4C, 0x8D, 0x35 };
+static const uint8_t k_scriptImport[] = { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
+                                          0x53, 0x48, 0x81, 0xEC, 0xA8, 0x00, 0x00, 0x00 };
 static const uint8_t k_defaultEntry[] = { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
                                           0x53, 0x48, 0x83, 0xEC, 0x18, 0x49, 0x89, 0xF7, 0x41, 0x89, 0xFC, 0xE8 };
 static const uint8_t k_exitLevel[] = { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
@@ -184,6 +190,21 @@ static Detour g_scriptErrorDetour{};
 static void*  g_scriptErrorOriginal = nullptr;
 static Detour g_errorDialogDetour{};
 static void*  g_errorDialogOriginal = nullptr;
+static Detour g_scriptImportDetour{};
+static void*  g_scriptImportOriginal = nullptr;
+
+struct MissingImport
+{
+    bool      valid;
+    int       inst;
+    uintptr_t script;
+    uint32_t  name;
+    uint32_t  space;
+    uint8_t   params;
+    uint8_t   flags;
+};
+
+static MissingImport g_missingImport{};
 static Detour g_defaultDetour{};
 static void*  g_defaultOriginal = nullptr;
 static Detour g_exitLevelDetour{};
@@ -241,15 +262,91 @@ static void Unlock()
     __sync_lock_release(&g_lock);
 }
 
+static char             g_queue[kQueueBytes];
+static char             g_flushing[kQueueBytes + 128];
+static size_t           g_queued = 0;
+static uint32_t         g_dropped = 0;
+static volatile int32_t g_queueLock = 0;
+static bool             g_writerUp = false;
+
+static void QueueLock()
+{
+    while (__sync_lock_test_and_set(&g_queueLock, 1))
+        sceKernelUsleep(50);
+}
+
+static void QueueUnlock()
+{
+    __sync_lock_release(&g_queueLock);
+}
+
 static void Append(const char* text, size_t size)
 {
-    const int fd = sceKernelOpen(kLogPath, SCE_KERNEL_O_WRONLY | SCE_KERNEL_O_CREAT | SCE_KERNEL_O_APPEND, 0777);
+    if (!g_writerUp)
+    {
+        const int fd = sceKernelOpen(kLogPath, SCE_KERNEL_O_WRONLY | SCE_KERNEL_O_CREAT | SCE_KERNEL_O_APPEND, 0777);
 
-    if (fd < 0)
+        if (fd >= 0)
+        {
+            sceKernelWrite(fd, text, size);
+            sceKernelClose(fd);
+        }
+
         return;
+    }
 
-    sceKernelWrite(fd, text, size);
-    sceKernelClose(fd);
+    QueueLock();
+
+    if (g_queued + size <= sizeof(g_queue))
+    {
+        memcpy(g_queue + g_queued, text, size);
+        g_queued += size;
+    }
+    else
+    {
+        ++g_dropped;
+    }
+
+    QueueUnlock();
+}
+
+static void* Writer(void*)
+{
+    int fd = -1;
+
+    for (;;)
+    {
+        sceKernelUsleep(kWriterEveryUs);
+
+        QueueLock();
+        size_t size = g_queued;
+        memcpy(g_flushing, g_queue, size);
+        g_queued = 0;
+        const uint32_t dropped = g_dropped;
+        g_dropped = 0;
+        QueueUnlock();
+
+        if (dropped)
+        {
+            const int note = snprintf(g_flushing + size, sizeof(g_flushing) - size, "[Log] %u line(s) dropped: logging faster than storage\n",
+                                      dropped);
+            size += note > 0 ? (size_t)note : 0;
+        }
+
+        if (!size)
+            continue;
+
+        if (fd < 0)
+            fd = sceKernelOpen(kLogPath, SCE_KERNEL_O_WRONLY | SCE_KERNEL_O_CREAT | SCE_KERNEL_O_APPEND, 0777);
+
+        if (fd >= 0 && sceKernelWrite(fd, g_flushing, size) < 0)
+        {
+            sceKernelClose(fd);
+            fd = -1;
+        }
+    }
+
+    return nullptr;
 }
 
 static void WriteV(const char* format, va_list args)
@@ -271,8 +368,8 @@ static void WriteV(const char* format, va_list args)
     size_t used = (size_t)stamp + ((size_t)body < room ? (size_t)body : room - 1);
     line[used++] = '\n';
     line[used] = 0;
-    Append(line, used);
     DebugOut(line);
+    Append(line, used);
 }
 
 static const char* ReadableText(uintptr_t p)
@@ -856,6 +953,26 @@ static uint64_t ScriptError(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, 
     return ((Passthrough_t)g_scriptErrorOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
 }
 
+static uint64_t ScriptImport(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
+                             double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
+{
+    const uint64_t result =
+        ((Passthrough_t)g_scriptImportOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
+
+    if (!(uint8_t)result && a2 && a3 && RangeReadable(a3, 12) && RangeReadable(a2, 64))
+    {
+        g_missingImport.valid = true;
+        g_missingImport.inst = (int)(uint32_t)a1;
+        g_missingImport.script = (uintptr_t)a2;
+        g_missingImport.name = *(const uint32_t*)a3;
+        g_missingImport.space = *(const uint32_t*)(a3 + 4);
+        g_missingImport.params = *(const uint8_t*)(a3 + 10);
+        g_missingImport.flags = *(const uint8_t*)(a3 + 11);
+    }
+
+    return result;
+}
+
 static uint64_t ErrorDialog(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
                             double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
 {
@@ -863,6 +980,18 @@ static uint64_t ErrorDialog(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, 
 
     T7Log_Write("[Error] Com_Error %u: %s (%u script runtime error(s) this level)", (uint32_t)a1,
                 message ? message : "(no message)", g_scriptErrors);
+
+    if (message && strstr(message, "script error(s)") && g_missingImport.valid)
+    {
+        const uintptr_t script = g_missingImport.script;
+        const char* const name = ReadableText(script + *(const uint32_t*)(script + 52));
+
+        T7Log_Write("[Script] the last %s call the linker could not resolve: function 0x%08X in namespace 0x%08X "
+                    "(%u parameter(s), import kind %u, flags 0x%02X), called from %s",
+                    g_missingImport.inst == 1 ? "client (csc)" : "server (gsc)", g_missingImport.name,
+                    g_missingImport.space, g_missingImport.params, g_missingImport.flags & 0xF, g_missingImport.flags,
+                    name ? name : "(unnamed script)");
+    }
 
     return ((Passthrough_t)g_errorDialogOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
 }
@@ -1089,6 +1218,14 @@ void T7Log_Install(uintptr_t base)
     if (fd >= 0)
         sceKernelClose(fd);
 
+    ScePthread writer;
+
+    if (scePthreadCreate(&writer, nullptr, Writer, nullptr, "BO3-Customs Log") == 0)
+    {
+        g_writerUp = true;
+        scePthreadDetach(writer);
+    }
+
     T7Log_Write("BO3-Customs debug log (Debug build of %s %s)", __DATE__, __TIME__);
     T7Log_Write("[Log] running on a %s; lines also go to %s", IsPs5() ? "PS5" : "PS4",
                 DebugSink() ? DebugSink() : "this file only");
@@ -1101,6 +1238,11 @@ void T7Log_Install(uintptr_t base)
                             (void*)ErrorDialog, &g_errorDialogOriginal);
     const bool missing = Hook(kDefaultEntry, k_defaultEntry, sizeof(k_defaultEntry), &g_defaultDetour,
                               (void*)DefaultEntry, &g_defaultOriginal);
+    const bool imports = Hook(kScriptImport, k_scriptImport, sizeof(k_scriptImport), &g_scriptImportDetour,
+                              (void*)ScriptImport, &g_scriptImportOriginal);
+
+    if (!imports)
+        T7Log_Write("[Log] script link failures will NOT name the missing function");
     const bool exitLevel = Hook(kExitLevel, k_exitLevel, sizeof(k_exitLevel), &g_exitLevelDetour, (void*)ExitLevel,
                                 &g_exitLevelOriginal);
     const bool map = Hook(kMapBuiltin, k_mapBuiltin, sizeof(k_mapBuiltin), &g_mapBuiltinDetour, (void*)MapBuiltin,
@@ -1236,6 +1378,51 @@ void T7Log_NewLevel()
     T7Log_Write("[Level] ---- a level is loading ----");
 }
 
+void T7Log_Pools(const char* when, uint32_t percent)
+{
+    using namespace T7Log;
+
+    if (!g_base)
+        return;
+
+    for (uint32_t type = 0; type < kTypeCount; ++type)
+    {
+        const uintptr_t pool = g_base + kAssetPools + 32 * (uintptr_t)type;
+        const uint32_t limit = *(const uint32_t*)(pool + 12);
+        const uint32_t used = *(const uint32_t*)(pool + 20);
+
+        if (!limit || limit > 0x400000 || used > 0x400000 || (uint64_t)used * 100 < (uint64_t)limit * percent)
+            continue;
+
+        T7Log_Write("[Pools] %s: %s %u of %u%s", when, k_typeNames[type], used, limit,
+                    used >= limit ? " - FULL" : "");
+    }
+}
+
+void T7Log_PoolOut(int32_t type)
+{
+    using namespace T7Log;
+
+    static bool told[kTypeCount] = {};
+
+    if (!g_base || type < 0 || (uint32_t)type >= kTypeCount || told[type])
+        return;
+
+    const uintptr_t pool = g_base + kAssetPools + 32 * (uintptr_t)type;
+    const uint32_t limit = *(const uint32_t*)(pool + 12);
+    const uint8_t single = *(const uint8_t*)(pool + 16);
+    const uint32_t used = *(const uint32_t*)(pool + 20);
+    const uintptr_t free = *(const uintptr_t*)(pool + 24);
+
+    if (free || single || !limit)
+        return;
+
+    told[type] = true;
+    T7Log_Write("[Pools] the %s pool has no room left (%u of %u) as another %s links", k_typeNames[type], used,
+                limit, k_typeNames[type]);
+    T7Log_Pools("when it ran out", 85);
+}
+
 #else
 
 void T7Log_Install(uintptr_t)
@@ -1263,6 +1450,14 @@ void T7Log_Zone(const char*, int32_t, int32_t)
 }
 
 void T7Log_NewLevel()
+{
+}
+
+void T7Log_Pools(const char*, uint32_t)
+{
+}
+
+void T7Log_PoolOut(int32_t)
 {
 }
 

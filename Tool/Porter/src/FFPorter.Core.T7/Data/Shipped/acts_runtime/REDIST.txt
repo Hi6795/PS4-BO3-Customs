@@ -1,0 +1,7 @@
+msvcp140.dll, vcruntime140.dll and vcruntime140_1.dll are the Microsoft Visual C++ runtime, taken from the x64
+redistributable that ships with Visual Studio (VC\Redist\MSVC\14.51.36231\x64\Microsoft.VC145.CRT). acts.exe and its
+libraries import them and they are not part of Windows, so they are copied beside acts.exe instead of being a machine
+prerequisite.
+
+Redistributed under the Microsoft Visual Studio redistributable rights. Microsoft grants no warranty for them and they
+remain Microsoft's; nothing here modifies them.

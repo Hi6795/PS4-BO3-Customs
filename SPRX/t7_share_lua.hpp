@@ -105,6 +105,7 @@ local function Build(root)
   made.bar = Fill(panel, -half, -half, -22, -8, 1, 0.5, 0.1, 1)
   made.detail = Text(panel, 12, 22, 0.9, 0.9, 0.9)
   made.file = Text(panel, 46, 18, 0.6, 0.6, 0.6)
+  made.speeds = Text(panel, 72, 18, 0.6, 0.6, 0.6)
   made.hint = Text(panel, 110, 18, 0.6, 0.6, 0.6)
   root:addElement(panel)
   return made
@@ -150,7 +151,7 @@ local function Panel()
   return made
 end
 
-Share.Show = function(title, name, detail, file, fraction, hint)
+Share.Show = function(title, name, detail, file, fraction, hint, speeds)
   local made = Panel()
   if made == nil then return end
   if not Share.visible then
@@ -172,6 +173,7 @@ Share.Show = function(title, name, detail, file, fraction, hint)
     made.detail:setText(detail or '')
     made.file:setText(file or '')
     made.hint:setText(hint or '')
+    made.speeds:setText(speeds or '')
     made.bar:setLeftRight(false, false, -half, -half + 2 * half * part)
     made.panel:setAlpha(1)
   end)

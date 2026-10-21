@@ -184,21 +184,41 @@ static void ReleaseImage(uint64_t image)
     *(uint64_t*)(image + kSlotReleased) = *(uint64_t*)(g_base + kImageFrame) + 3;
 }
 
+static bool ModPicturePath(const char* name, char* path, size_t size)
+{
+    const char* const key = name + sizeof(T7_MOD_PREVIEW_PREFIX) - 1;
+
+    if (strlen(key) != 8)
+        return false;
+
+    uint32_t value = 0;
+
+    for (const char* c = key; *c; ++c)
+    {
+        const int digit = *c >= '0' && *c <= '9' ? *c - '0' : *c >= 'a' && *c <= 'f' ? *c - 'a' + 10 : -1;
+
+        if (digit < 0)
+            return false;
+
+        value = value * 16 + (uint32_t)digit;
+    }
+
+    return T7Maps_ModPreviewFile(value, path, size);
+}
+
 static uint64_t MakePicture(const char* name)
 {
-    const bool preview = strncmp(name, T7_USERMAP_PREVIEW_PREFIX, sizeof(T7_USERMAP_PREVIEW_PREFIX) - 1) == 0;
+    const bool mod = strncmp(name, T7_MOD_PREVIEW_PREFIX, sizeof(T7_MOD_PREVIEW_PREFIX) - 1) == 0;
+    const bool preview = mod || strncmp(name, T7_USERMAP_PREVIEW_PREFIX, sizeof(T7_USERMAP_PREVIEW_PREFIX) - 1) == 0;
     const char* const map = name + (preview ? sizeof(T7_USERMAP_PREVIEW_PREFIX) : sizeof(T7_USERMAP_LOADING_PREFIX)) - 1;
-    const char* const previewFile = preview ? T7Maps_PreviewFile(map) : nullptr;
+    const char* const previewFile = preview && !mod ? T7Maps_PreviewFile(map) : nullptr;
     const char* const file = preview ? (previewFile ? previewFile : "previewimage.png") : "loadingimage.png";
     const int width = preview ? kPreviewWidth : kLoadingWidth;
     const int height = preview ? kPreviewHeight : kLoadingHeight;
 
-    if (!IsMapToken(map))
-        return 0;
-
     char path[320];
 
-    if (!T7Maps_MapFile(map, file, path, sizeof(path)))
+    if (mod ? !ModPicturePath(name, path, sizeof(path)) : !IsMapToken(map) || !T7Maps_MapFile(map, file, path, sizeof(path)))
         return 0;
 
     size_t size = 0;
@@ -254,7 +274,8 @@ static uint64_t MakePicture(const char* name)
 static bool IsPictureName(const char* name)
 {
     return strncmp(name, T7_USERMAP_PREVIEW_PREFIX, sizeof(T7_USERMAP_PREVIEW_PREFIX) - 1) == 0 ||
-           strncmp(name, T7_USERMAP_LOADING_PREFIX, sizeof(T7_USERMAP_LOADING_PREFIX) - 1) == 0;
+           strncmp(name, T7_USERMAP_LOADING_PREFIX, sizeof(T7_USERMAP_LOADING_PREFIX) - 1) == 0 ||
+           strncmp(name, T7_MOD_PREVIEW_PREFIX, sizeof(T7_MOD_PREVIEW_PREFIX) - 1) == 0;
 }
 
 static bool IsPicture(uint64_t image)

@@ -15,3 +15,7 @@ void T7Log_LuaFailure(uintptr_t L, uint64_t topOffset, const char* chunk, const 
 void T7Log_Zone(const char* name, int32_t allocFlags, int32_t freeFlags);
 
 void T7Log_NewLevel();
+
+void T7Log_Pools(const char* when, uint32_t percent);
+
+void T7Log_PoolOut(int32_t type);

@@ -3,6 +3,9 @@
 #include "t7_maps.hpp"
 #include "t7_config.hpp"
 #include "t7_share_lua.hpp"
+#include <system_service.h>
+
+#include <atomic>
 
 namespace T7Lua
 {
@@ -18,7 +21,10 @@ constexpr uintptr_t kDvarFind        = 0xFB6ED0;
 constexpr uintptr_t kDvarString      = 0xFB69C0;
 constexpr uintptr_t kDvarSetByName   = 0xFBC5A0;
 constexpr uintptr_t kFindXAsset      = 0x8591B0;
+constexpr uintptr_t kExecFindReturn  = 0xEE77D9;
+constexpr int       kLuiMaxFolders   = 5;
 constexpr uintptr_t kLuiAddMenu      = 0x11CDD10;
+constexpr uintptr_t kLuaRequire      = 0xDB5320;
 constexpr uintptr_t kFrameLimitSkip  = 0xF0BBF3;
 constexpr uintptr_t kSplitNarrow     = 0x6FD736;
 constexpr uintptr_t kSplitLayouts    = 0x16094F0;
@@ -88,6 +94,12 @@ static const char k_modsDataProbeLua[] =
     "local engine = rawget(_G, 'Engine')\n"
     "if engine ~= nil and rawget(_G, 'BO3CustomMods') == nil then engine.SetDvar('bo3customs_mods_data', 1) end\n";
 
+static const char k_menusProbeLua[] =
+    "local engine = rawget(_G, 'Engine')\n"
+    "if engine == nil then return end\n"
+    "local ok, menu = pcall(function() return LUI.createMenu.main end)\n"
+    "engine.SetDvar('bo3customs_menus', (ok and menu ~= nil) and 1 or 2)\n";
+
 static const char k_modsProbeLua[] =
     "local engine = rawget(_G, 'Engine')\n"
     "local cod = rawget(_G, 'CoD')\n"
@@ -101,9 +113,784 @@ static const char k_refreshedLua[] =
     "local tabs = rawget(_G, 'BO3CustomsMapTabs')\n"
     "if tabs ~= nil and tabs.Refreshed ~= nil then tabs.Refreshed() end\n";
 
+static const char k_lobbyMapsLua[] = R"LUA(
+local G = _G
+local engine = rawget(G, 'Engine')
+if engine == nil then return end
+local Lobby = rawget(G, 'BO3CustomsLobbyMaps')
+if Lobby == nil then
+  Lobby = { version = -1 }
+  rawset(G, 'BO3CustomsLobbyMaps', Lobby)
+end
+
+local function trace(text)
+  Lobby.pending = Lobby.pending or {}
+  if #Lobby.pending < 50 then
+    Lobby.pending[#Lobby.pending + 1] = 'lobby: ' .. string.sub(tostring(text), 1, 140)
+  end
+  local tabs = rawget(G, 'BO3CustomsMapTabs')
+  if type(tabs) ~= 'table' or type(tabs.logs) ~= 'table' then return end
+  while #Lobby.pending > 0 and #tabs.logs < 200 do
+    tabs.logs[#tabs.logs + 1] = table.remove(Lobby.pending, 1)
+  end
+end
+Lobby.trace = trace
+
+local function ask(text)
+  local ok, value = pcall(engine.GetDLCBitForMapName, 'bo3customs:' .. text)
+  if ok and type(value) == 'number' then return value end
+  return 0
+end
+Lobby.ask = ask
+
+local function call(name, ...)
+  local fn = rawget(G, name)
+  if type(fn) ~= 'function' then return nil end
+  local ok, value = pcall(fn, ...)
+  if ok then return value end
+  return nil
+end
+
+local function plainName(text)
+  if type(text) ~= 'string' then return nil end
+  text = string.gsub(text, '^%[[^%]]*%]', '')
+  if text == '' then return nil end
+  return text
+end
+
+local function register()
+  if Lobby.registered then return end
+  local okC, controller = pcall(engine.GetPrimaryController)
+  controller = okC and controller or 0
+  for _, getter in ipairs({ 'GetSelfGamertag', 'GetGamertagForController' }) do
+    local fn = engine[getter]
+    if type(fn) == 'function' then
+      local ok, name = pcall(fn, controller)
+      name = ok and plainName(name) or nil
+      if name ~= nil then
+        Lobby.registered = ask('me:' .. name) == 1
+        return
+      end
+    end
+  end
+end
+
+local function nextMap()
+  local okG, global = pcall(engine.GetGlobalModel)
+  if not okG or global == nil then return nil, nil end
+  local okM, model = pcall(engine.GetModel, global, 'MapVote.mapVoteMapNext')
+  if not okM or model == nil then return nil, nil end
+  local okV, value = pcall(engine.GetModelValue, model)
+  if okV and type(value) == 'string' and value ~= '' then return value, model end
+  return nil, model
+end
+Lobby.nextMap = nextMap
+
+local function memberName(element)
+  if element == nil or type(element.getModel) ~= 'function' then return nil end
+  local ok, model = pcall(element.getModel, element)
+  if not ok or model == nil then return nil end
+  for _, field in ipairs({ 'gamertag', 'clanTagAndGamertag' }) do
+    local okX, child = pcall(engine.GetModel, model, field)
+    if okX and child ~= nil then
+      local okV, value = pcall(engine.GetModelValue, child)
+      local name = okV and plainName(value) or nil
+      if name ~= nil then return name end
+    end
+  end
+  return nil
+end
+
+Lobby.hosting = function()
+  return ask('lanhost') == 1
+end
+
+local function note(key, text)
+  Lobby.notes = Lobby.notes or {}
+  Lobby.noteCount = Lobby.noteCount or 0
+  if Lobby.notes[key] == text or Lobby.noteCount >= 80 then return end
+  Lobby.notes[key] = text
+  Lobby.noteCount = Lobby.noteCount + 1
+  trace(text)
+end
+
+local function lobbyMap()
+  local ok, value = pcall(engine.DvarString, nil, 'ui_mapname')
+  if ok and type(value) == 'string' and value ~= '' then return string.lower(value) end
+  return (nextMap())
+end
+
+local function dlcMissing(owned, map)
+  if type(owned) ~= 'number' or owned == 0 or map == nil then return false end
+  local cod = rawget(G, 'CoD')
+  local bits = type(cod) == 'table' and rawget(cod, 'BitUtility') or nil
+  if type(bits) ~= 'table' or type(bits.IsBitwiseAndNonZero) ~= 'function' then return false end
+  local okB, bit = pcall(engine.GetDLCBitForMapName, map)
+  if not okB or type(bit) ~= 'number' or bit == 0 then return false end
+  local okA, has = pcall(bits.IsBitwiseAndNonZero, owned, bit)
+  return okA and has == false
+end
+Lobby.dlcMissing = dlcMissing
+
+local function stockMissing(element, map, name)
+  local owned = nil
+  local ok, model = pcall(element.getModel, element)
+  if ok and model ~= nil then
+    local okD, child = pcall(engine.GetModel, model, 'dlcBits')
+    if okD and child ~= nil then
+      local okV, value = pcall(engine.GetModelValue, child)
+      if okV and type(value) == 'number' and value ~= 0 then owned = value end
+    end
+  end
+  if owned == nil and name ~= nil and Lobby.clientByName ~= nil then
+    local client = Lobby.clientByName(name)
+    if client ~= nil then owned = client.dlcBits end
+  end
+  return dlcMissing(owned, map)
+end
+
+local function cardLabel(value)
+  if value == 1 then return 'missing' end
+  if value == 2 then return 'missing the map pack' end
+  if value >= 100 then return 'downloading' end
+  if value == 0 then return 'has it or sent no map list' end
+  return 'no lobby map'
+end
+
+local function cardValue(element)
+  if element == nil or type(element.getModel) ~= 'function' or ask('lan') ~= 1 then return nil end
+  local name = memberName(element)
+  if name == nil then
+    note('card name', 'card: a lobby row has no gamertag yet')
+    return nil
+  end
+  local map = lobbyMap()
+  local value = ask('card:' .. (map or '') .. '|' .. name)
+  if value == -2 then
+    value = 0
+    if map ~= nil and stockMissing(element, map, name) then value = 2 end
+  end
+  note('card ' .. name, 'card for ' .. name .. ' on ' .. tostring(map) .. ': ' .. cardLabel(value))
+  return value
+end
+
+Lobby.missing = function(element)
+  local value = cardValue(element)
+  if value == nil then return nil end
+  return value == 1 or value == 2 or value >= 100
+end
+
+local function wrapRed()
+  local original = rawget(G, 'ShowClientInRedForMissingDLC')
+  if type(original) ~= 'function' or original == Lobby.red then return end
+  Lobby.red = function(element, controller)
+    if Lobby.markName ~= nil then
+      local okTag, err = pcall(Lobby.markName, element)
+      if not okTag then note('card attach', 'card attach failed: ' .. tostring(err)) end
+    end
+    if ask('lan') == 1 then return false end
+    return original(element, controller)
+  end
+  rawset(G, 'ShowClientInRedForMissingDLC', Lobby.red)
+end
+
+local Tag = { row = 62, half = 8, pad = 6, every = 500 }
+
+local function markName(widget)
+  if widget == nil or widget.bo3CardState ~= nil then return end
+  local label = widget.gamertag
+  local lui = rawget(G, 'LUI')
+  if label == nil or type(label.setText) ~= 'function' or type(lui) ~= 'table' then return end
+  if type(lui.UIText) ~= 'table' or type(lui.UIImage) ~= 'table' or type(lui.UIElement) ~= 'table' then return end
+  local card = lui.UIImage.new()
+  card:setLeftRight(true, false, -Tag.row - 100, -Tag.row)
+  card:setTopBottom(false, false, -Tag.half - 3, Tag.half + 3)
+  card:setRGB(0.05, 0.05, 0.05)
+  card:setAlpha(0)
+  widget:addElement(card)
+  local tag = lui.UIText.new()
+  tag:setLeftRight(true, false, -Tag.row - 94, -Tag.row - 4)
+  tag:setTopBottom(false, false, -Tag.half, Tag.half)
+  tag:setTTF('fonts/RefrigeratorDeluxe-Regular.ttf')
+  if Enum ~= nil and Enum.LUIAlignment ~= nil and Enum.LUIAlignment.LUI_ALIGNMENT_LEFT ~= nil then
+    tag:setAlignment(Enum.LUIAlignment.LUI_ALIGNMENT_LEFT)
+  end
+  tag:setRGB(1, 0.3, 0.25)
+  tag:setAlpha(0)
+  tag:setText('MISSING MAP')
+  widget:addElement(tag)
+  local state = { tag = tag, card = card, shown = false, width = -1, text = 'MISSING MAP' }
+  widget.bo3CardState = state
+  Lobby.cards = (Lobby.cards or 0) + 1
+  if Lobby.cards == 1 then trace('name cards attached to the lobby rows') end
+  local function fit()
+    local width = 0
+    if type(tag.getTextWidth) == 'function' then
+      local okW, measured = pcall(tag.getTextWidth, tag)
+      if okW and type(measured) == 'number' then width = measured end
+    end
+    if width <= 0 then width = string.len(state.text) * 8 end
+    width = math.floor(width + 0.5)
+    if width ~= state.width then
+      state.width = width
+      local right = -Tag.row
+      card:setLeftRight(true, false, right - width - 2 * Tag.pad, right)
+      tag:setLeftRight(true, false, right - width - Tag.pad, right - Tag.pad + 2)
+    end
+  end
+  local function show()
+    local okV, value = pcall(cardValue, widget)
+    if not okV then
+      note('card error', 'card check failed: ' .. tostring(value))
+      value = nil
+    end
+    local text = nil
+    if value == 1 then
+      text = 'MISSING MAP'
+    elseif value == 2 then
+      text = 'MISSING DLC'
+    elseif type(value) == 'number' and value >= 100 then
+      text = 'DOWNLOADING ' .. tostring(math.floor(value - 100 + 0.5)) .. '%'
+    end
+    local shown = text ~= nil
+    if shown and text ~= state.text then
+      state.text = text
+      tag:setText(text)
+      if value >= 100 then tag:setRGB(1, 0.6, 0.1) else tag:setRGB(1, 0.3, 0.25) end
+    end
+    if shown then fit() end
+    if shown ~= state.shown then
+      state.shown = shown
+      tag:setAlpha(shown and 1 or 0)
+      card:setAlpha(shown and 0.8 or 0)
+    end
+  end
+  local set = label.setText
+  label.setText = function(self, ...)
+    local result = set(self, ...)
+    pcall(show)
+    return result
+  end
+  local ticker = lui.UIElement.new()
+  ticker:setLeftRight(true, false, 0, 1)
+  ticker:setTopBottom(true, false, 0, 1)
+  ticker:setAlpha(0)
+  widget:addElement(ticker)
+  local function schedule()
+    ticker:beginAnimation('bo3_missing', Tag.every, false, false, CoD.TweenType.Linear)
+    ticker:setAlpha(0)
+  end
+  ticker:registerEventHandler('transition_complete_bo3_missing', function()
+    pcall(show)
+    schedule()
+  end)
+  schedule()
+  pcall(show)
+end
+Lobby.markName = markName
+
+local function wrapNames()
+  local cod = rawget(G, 'CoD')
+  local class = type(cod) == 'table' and rawget(cod, 'LobbyMemberGamertag') or nil
+  if type(class) ~= 'table' or type(class.new) ~= 'function' or rawget(class, 'bo3CardHook') ~= nil then return end
+  if type(rawget(G, 'LUI')) ~= 'table' or LUI.UIElement == nil then return end
+  local new = class.new
+  rawset(class, 'bo3CardHook', true)
+  class.new = function(...)
+    local widget = new(...)
+    if widget ~= nil then
+      local ok, err = pcall(markName, widget)
+      if not ok then note('card attach', 'card attach failed: ' .. tostring(err)) end
+    end
+    return widget
+  end
+end
+
+local function lanGame()
+  local okI, inGame = pcall(engine.IsInGame)
+  return okI and inGame == true and call('IsLive') ~= true
+end
+
+local function wrapPing()
+  local value = rawget(G, 'GetScoreboardPingValueAlpha')
+  if type(value) == 'function' and value ~= Lobby.pingValue then
+    Lobby.pingValue = function(alpha, ...)
+      if lanGame() then return alpha end
+      return value(alpha, ...)
+    end
+    rawset(G, 'GetScoreboardPingValueAlpha', Lobby.pingValue)
+  end
+  local bars = rawget(G, 'GetScoreboardPingBarAlpha')
+  if type(bars) == 'function' and bars ~= Lobby.pingBars then
+    Lobby.pingBars = function(ping, ...)
+      if lanGame() then return 0 end
+      return bars(ping, ...)
+    end
+    rawset(G, 'GetScoreboardPingBarAlpha', Lobby.pingBars)
+  end
+  local cod = rawget(G, 'CoD')
+  local row = type(cod) == 'table' and rawget(cod, 'ScoreboardRowWidget') or nil
+  if type(row) == 'table' and type(row.new) == 'function' and rawget(row, 'bo3Ping') == nil then
+    local new = row.new
+    rawset(row, 'bo3Ping', true)
+    row.new = function(...)
+      local element = new(...)
+      if element ~= nil and lanGame() then
+        pcall(function()
+          if element.PingText ~= nil then element.PingText:setAlpha(1) end
+        end)
+      end
+      return element
+    end
+  end
+end
+
+local function lobbyTypes()
+  local enum = rawget(G, 'Enum')
+  if type(enum) ~= 'table' or type(enum.LobbyType) ~= 'table' then return nil end
+  return enum.LobbyType
+end
+
+local function lobbyOf(xuid)
+  local types = lobbyTypes()
+  if xuid == nil or types == nil or type(engine.LobbyIsPlayerInLobby) ~= 'function' then return nil end
+  for _, kind in ipairs({ types.LOBBY_TYPE_GAME, types.LOBBY_TYPE_PRIVATE }) do
+    local ok, inside = pcall(engine.LobbyIsPlayerInLobby, kind, xuid)
+    if ok and inside then return kind end
+  end
+  return nil
+end
+
+local function sessionClients()
+  local enum = rawget(G, 'Enum')
+  local modules = type(enum) == 'table' and enum.LobbyModule or nil
+  local types = lobbyTypes()
+  if type(modules) ~= 'table' or types == nil or type(engine.LobbyGetSessionClients) ~= 'function' then
+    return nil, 'the lobby player list is not available'
+  end
+  local module = modules.LOBBY_MODULE_CLIENT
+  if Lobby.hosting() then module = modules.LOBBY_MODULE_HOST end
+  local ok, data = pcall(engine.LobbyGetSessionClients, module, types.LOBBY_TYPE_GAME)
+  if not ok then return nil, tostring(data) end
+  if type(data) ~= 'table' or type(data.sessionClients) ~= 'table' then return nil, 'the lobby sent no player list' end
+  return data.sessionClients
+end
+
+Lobby.clientByName = function(name)
+  local clients = sessionClients()
+  if clients == nil or name == nil then return nil end
+  for _, client in ipairs(clients) do
+    if type(client) == 'table' and plainName(client.gamertag) == name then return client end
+  end
+  return nil
+end
+
+Lobby.stockLacking = function(map)
+  local clients = sessionClients()
+  if clients == nil then return 0 end
+  local count = 0
+  for _, client in ipairs(clients) do
+    if type(client) == 'table' and client.isHost ~= true and client.isLocal ~= true and dlcMissing(client.dlcBits, map) then
+      count = count + 1
+    end
+  end
+  if count > 0 then note('pack ' .. tostring(map), tostring(count) .. ' player(s) lack the map pack for ' .. tostring(map)) end
+  return count
+end
+
+local function clientFor(xuid, gamertag)
+  local clients = sessionClients()
+  if clients == nil then return nil end
+  local plain = plainName(gamertag)
+  for _, client in ipairs(clients) do
+    if type(client) == 'table' then
+      local same = false
+      if xuid ~= nil and client.xuid ~= nil then
+        local ok, equal = pcall(function() return client.xuid == xuid end)
+        same = ok and equal == true
+      end
+      if not same and plain ~= nil then same = plainName(client.gamertag) == plain end
+      if same then return client end
+    end
+  end
+  return nil
+end
+
+local function localized(ref)
+  local ok, text = pcall(engine.Localize, ref)
+  if ok and type(text) == 'string' and text ~= '' then return text end
+  return ref
+end
+
+local function closeMenu(menu, controller)
+  if menu ~= nil then pcall(function() menu:goBack(controller) end) end
+end
+
+local function kickPlayer(controller, kind, xuid)
+  local enum = rawget(G, 'Enum')
+  local reason = enum and enum.LobbyDisconnectClient and enum.LobbyDisconnectClient.LOBBY_DISCONNECT_CLIENT_KICK
+  return pcall(engine.LobbyDisconnectClient, controller, kind, xuid, reason)
+end
+
+local function lacksLobbyMap(gamertag, client)
+  local name = plainName(gamertag)
+  if name == nil and client ~= nil then name = plainName(client.gamertag) end
+  if name == nil then return false end
+  local map = lobbyMap()
+  local value = ask('card:' .. (map or '') .. '|' .. name)
+  if value == -2 then
+    if client == nil then client = Lobby.clientByName(name) end
+    return client ~= nil and dlcMissing(client.dlcBits, map)
+  end
+  return value == 1 or value >= 100
+end
+
+local function clock()
+  local ok, ms = pcall(engine.milliseconds)
+  if ok and type(ms) == 'number' then return ms end
+  return 0
+end
+
+local function handOver(param, client)
+  local id = client ~= nil and client.xuidstr or nil
+  local types = lobbyTypes()
+  local kind = param.kind or (types ~= nil and types.LOBBY_TYPE_GAME) or 1
+  local done = false
+  if type(id) == 'string' and id ~= '' then
+    local query = string.format('promote:%d|%d|%s', math.floor(tonumber(param.controller) or 0), math.floor(tonumber(kind) or 1), id)
+    done = ask(query) == 1
+  end
+  trace('promote ' .. tostring(param.gamertag) .. ' (id ' .. tostring(id) .. ', lobby type ' .. tostring(kind) .. '): ' .. (done and 'handing the lobby over' or 'refused'))
+end
+
+local function lackingPlayers()
+  local names = {}
+  local clients = sessionClients()
+  if clients == nil then return names end
+  for _, client in ipairs(clients) do
+    if type(client) == 'table' and client.isLocal ~= true and client.isHost ~= true and lacksLobbyMap(client.gamertag, client) then
+      names[#names + 1] = plainName(client.gamertag) or '?'
+    end
+  end
+  return names
+end
+
+local function promoteAction(self, element, controller, param, menu)
+  closeMenu(menu, controller)
+  local client = clientFor(param.xuid, param.gamertag)
+  local lacking = lackingPlayers()
+  if #lacking == 0 and not lacksLobbyMap(param.gamertag, client) then
+    handOver(param, client)
+    return
+  end
+  if #lacking == 0 then lacking[1] = plainName(param.gamertag) or '?' end
+  local current = lobbyMap() or ''
+  local map = 'zm_zod'
+  if string.sub(current, 1, 3) == 'mp_' then map = 'mp_sector' end
+  local setMap = rawget(G, 'SetMap')
+  if current == map or type(setMap) ~= 'function' then
+    trace('promote ' .. tostring(param.gamertag) .. ': refused, ' .. table.concat(lacking, ', ') .. ' do not have ' .. current)
+    return
+  end
+  local ok, err = pcall(setMap, param.controller or 0, map)
+  trace('promote ' .. tostring(param.gamertag) .. ': ' .. table.concat(lacking, ', ') .. ' do not have ' .. current .. ', switching the lobby to ' .. map .. ' first' .. (ok and '' or (' failed: ' .. tostring(err))))
+  if ok then Lobby.promoteLater = { param = param, at = clock() + 3000 } end
+end
+
+local function promoteLater()
+  local pending = Lobby.promoteLater
+  if pending == nil or clock() < pending.at then return end
+  Lobby.promoteLater = nil
+  if not Lobby.hosting() then return end
+  local client = clientFor(pending.param.xuid, pending.param.gamertag)
+  if lacksLobbyMap(pending.param.gamertag, client) then
+    trace('promote ' .. tostring(pending.param.gamertag) .. ': refused, they do not have ' .. tostring(lobbyMap()))
+    return
+  end
+  local lacking = lackingPlayers()
+  if #lacking > 0 then
+    trace('promote: ' .. table.concat(lacking, ', ') .. ' still do not have ' .. tostring(lobbyMap()) .. ' and will drop out')
+  end
+  handOver(pending.param, client)
+end
+
+local function kickAction(self, element, controller, param, menu)
+  kickPlayer(param.controller, param.kind, param.xuid)
+  trace('kicked ' .. tostring(param.gamertag))
+  closeMenu(menu, controller)
+end
+
+local function banAction(self, element, controller, param, menu)
+  local client = clientFor(param.xuid, param.gamertag)
+  local id = client ~= nil and client.xuidstr or ''
+  local name = plainName(param.gamertag) or (client ~= nil and plainName(client.gamertag)) or ''
+  ask('ban:' .. tostring(id) .. '|' .. name)
+  kickPlayer(param.controller, param.kind, param.xuid)
+  trace('banned ' .. tostring(param.gamertag) .. ' (id ' .. tostring(id) .. ')')
+  closeMenu(menu, controller)
+end
+
+local function lanDetails(controller)
+  local list = {}
+  local okRoot, root = pcall(engine.GetModelForController, controller)
+  if not okRoot or root == nil then return list end
+  local function value(name)
+    local okM, model = pcall(engine.CreateModel, root, name)
+    if not okM or model == nil then return nil end
+    local okV, v = pcall(engine.GetModelValue, model)
+    if okV then return v end
+    return nil
+  end
+  local xuid = value('Social.selectedFriendXUID')
+  local gamertag = value('Social.selectedFriendGamertag')
+  if xuid == nil then return list end
+  local okMe, me = pcall(engine.GetXUID64, controller)
+  local kind = lobbyOf(xuid)
+  local params = { controller = controller, xuid = xuid, gamertag = gamertag, kind = kind }
+  local function add(text, action, last, disabled)
+    list[#list + 1] = { models = { displayText = text },
+      properties = { disabled = disabled == true, action = action, actionParam = params, isLastButtonInGroup = last == true } }
+  end
+  local other = not (okMe and me == xuid)
+  if other and kind ~= nil and Lobby.hosting() then
+    local target = clientFor(xuid, gamertag)
+    local id = target ~= nil and target.xuidstr or nil
+    local reachable = type(id) ~= 'string' or id == '' or ask('canhost:' .. id) == 1
+    add(reachable and 'Promote to Host' or "Promote to Host (Can't Host)", promoteAction, false, not reachable)
+    add('Kick from Lobby', kickAction)
+    add('Ban from Lobby', banAction, true)
+  end
+  if other and kind ~= nil then
+    local okMuted, muted = pcall(engine.IsPlayerMuted, controller, kind, xuid)
+    if okMuted and muted then
+      add(localized('MENU_UNMUTE_PLAYER'), rawget(G, 'UnMutePlayer'), true)
+    else
+      add(localized('MENU_MUTE_PLAYER'), rawget(G, 'MutePlayer'), true)
+    end
+  end
+  trace('player menu for ' .. tostring(gamertag) .. ': ' .. tostring(#list) .. ' option(s), lobby type ' .. tostring(kind))
+  return list
+end
+
+local function wrapDetails()
+  local sources = rawget(G, 'DataSources')
+  local setup = rawget(G, 'ListHelper_SetupDataSource')
+  if type(sources) ~= 'table' or type(setup) ~= 'function' then return end
+  local original = rawget(sources, 'SocialPlayerDetailsButtons')
+  if type(original) ~= 'table' or rawget(original, 'bo3Lan') ~= nil then return end
+  local okLan, lan = pcall(setup, 'SocialPlayerDetailsButtons', lanDetails, nil, nil, nil, original.getSpacerAfterRow)
+  if not okLan or type(lan) ~= 'table' then return end
+  rawset(sources, 'SocialPlayerDetailsButtons', setmetatable({ bo3Lan = true }, { __index = function(_, key)
+    if ask('lan') == 1 then return lan[key] end
+    return original[key]
+  end }))
+  trace('player menu ready for LAN lobbies')
+end
+
+local function wrapProfile()
+  local original = rawget(G, 'OpenPlatformProfile')
+  if type(original) ~= 'function' or original == Lobby.profileHook then return end
+  Lobby.profile = original
+  Lobby.profileHook = function(self, element, controller, param, menu, ...)
+    local open = rawget(G, 'OpenOverlay')
+    if type(param) ~= 'table' and ask('lan') == 1 and type(open) == 'function' then
+      local ok, err = pcall(open, self, 'Social_PlayerDetailsPopup', controller, '', '')
+      if not ok then trace('player menu failed to open: ' .. tostring(err)) end
+      return
+    end
+    return original(self, element, controller, param, menu, ...)
+  end
+  rawset(G, 'OpenPlatformProfile', Lobby.profileHook)
+end
+
+local function enforceBans()
+  if not Lobby.hosting() then return end
+  local clients, why = sessionClients()
+  if clients == nil then
+    note('bans', 'ban check cannot read the players: ' .. tostring(why))
+    return
+  end
+  local okC, controller = pcall(engine.GetPrimaryController)
+  controller = okC and controller or 0
+  Lobby.kicked = Lobby.kicked or {}
+  local now = 0
+  local okT, ms = pcall(engine.milliseconds)
+  if okT and type(ms) == 'number' then now = ms end
+  local types = lobbyTypes()
+  local seen = 0
+  for _, client in ipairs(clients) do
+    if type(client) == 'table' and client.xuid ~= nil and client.isHost ~= true and client.isLocal ~= true then
+      seen = seen + 1
+      local id = type(client.xuidstr) == 'string' and client.xuidstr or ''
+      local name = plainName(client.gamertag) or ''
+      if ask('banned:' .. id .. '|' .. name) == 1 then
+        local key = id .. '|' .. name
+        if now - (Lobby.kicked[key] or -10000) > 3000 then
+          Lobby.kicked[key] = now
+          local kind = lobbyOf(client.xuid) or (types ~= nil and types.LOBBY_TYPE_GAME) or 1
+          local ok = kickPlayer(controller, kind, client.xuid)
+          trace('kicked banned player ' .. name .. (ok and '' or ' (the kick failed)'))
+        end
+      end
+    end
+  end
+  note('bans', 'ban check sees ' .. tostring(seen) .. ' other player(s)')
+end
+
+local function wrapChallenges()
+  local cod = rawget(G, 'CoD')
+  local utility = type(cod) == 'table' and rawget(cod, 'ChallengesUtility') or nil
+  if type(utility) ~= 'table' then return end
+  local original = rawget(utility, 'GetDailyChallenge')
+  if type(original) ~= 'function' or original == Lobby.dailyHook then return end
+  Lobby.dailyHook = function(...)
+    local ok, value = pcall(original, ...)
+    if ok then return value end
+    note('daily', 'daily challenge skipped, the stats are not loaded: ' .. tostring(value))
+    return nil
+  end
+  rawset(utility, 'GetDailyChallenge', Lobby.dailyHook)
+end
+
+local PauseMenus = { StartMenu_Main = true, DOA_INGAME_PAUSE = true }
+
+local function holdsPauseMenu(element, depth)
+  local okC, child = pcall(function() return element:getFirstChild() end)
+  child = okC and child or nil
+  while child ~= nil do
+    local okN, name = pcall(function() return child.menuName end)
+    if okN and name ~= nil and PauseMenus[name] then return true end
+    if depth > 1 and holdsPauseMenu(child, depth - 1) then return true end
+    local okS, nextChild = pcall(function() return child:getNextSibling() end)
+    child = okS and nextChild or nil
+  end
+  return false
+end
+
+local function watchPause()
+  local lui = rawget(G, 'LUI')
+  local roots = type(lui) == 'table' and rawget(lui, 'roots') or nil
+  local open = false
+  if type(roots) == 'table' then
+    for _, root in pairs(roots) do
+      if not open then open = holdsPauseMenu(root, 2) end
+    end
+  end
+  if open ~= Lobby.pauseOpen then
+    Lobby.pauseOpen = open
+    ask('pausemenu:' .. (open and '1' or '0'))
+  end
+end
+
+local function downloadingPlayers()
+  local names = {}
+  local clients = sessionClients()
+  if clients == nil then return names end
+  local map = lobbyMap()
+  for _, client in ipairs(clients) do
+    local name = type(client) == 'table' and client.isLocal ~= true and client.isHost ~= true and plainName(client.gamertag) or nil
+    if name ~= nil then
+      local value = ask('card:' .. (map or '') .. '|' .. name)
+      if value >= 100 then
+        names[#names + 1] = name .. ' (' .. tostring(math.floor(value - 100 + 0.5)) .. '%)'
+      elseif value == 1 then
+        names[#names + 1] = name
+      end
+    end
+  end
+  return names
+end
+
+local function guardLaunch(original)
+  return function(self, element, controller, ...)
+    if not Lobby.hosting() then return original(self, element, controller, ...) end
+    local waiting = downloadingPlayers()
+    local tabs = rawget(G, 'BO3CustomsMapTabs')
+    local choose = type(tabs) == 'table' and rawget(tabs, 'ShowChoice') or nil
+    if #waiting == 0 or type(choose) ~= 'function' then return original(self, element, controller, ...) end
+    local count = #waiting
+    local text = table.concat(waiting, ', ') .. (count == 1 and ' is' or ' are') .. ' still downloading the map. Start anyway?'
+    local ok, shown = pcall(choose, self, controller, 'STILL DOWNLOADING', text, {
+      { label = 'Start Anyway', run = function()
+        trace('start: started while ' .. table.concat(waiting, ', ') .. ' downloaded')
+        original(self, element, controller)
+      end },
+      { label = 'Wait', focus = true },
+    })
+    if not ok or not shown then
+      trace('start: the download popup did not open (' .. tostring(shown) .. '), starting')
+      return original(self, element, controller, ...)
+    end
+    trace('start: asked first, ' .. table.concat(waiting, ', ') .. ' still downloading')
+  end
+end
+
+local function wrapLaunch()
+  local original = rawget(G, 'LobbyLANLaunchGame')
+  if type(original) ~= 'function' or original == Lobby.launchHook then return end
+  Lobby.launchHook = guardLaunch(original)
+  rawset(G, 'LobbyLANLaunchGame', Lobby.launchHook)
+  local cod = rawget(G, 'CoD')
+  local buttons = type(cod) == 'table' and rawget(cod, 'LobbyButtons') or nil
+  local swapped = 0
+  if type(buttons) == 'table' then
+    for _, button in pairs(buttons) do
+      if type(button) == 'table' and rawget(button, 'action') == original then
+        rawset(button, 'action', Lobby.launchHook)
+        swapped = swapped + 1
+      end
+    end
+  end
+  trace('start: download check on ' .. tostring(swapped) .. ' LAN start button(s)')
+end
+
+local function step(name, fn)
+  local ok, err = pcall(fn)
+  if not ok then note('step ' .. name, name .. ' failed: ' .. tostring(err)) end
+end
+
+Lobby.tick = function()
+  if Lobby.pending ~= nil and #Lobby.pending > 0 then
+    local tabs = rawget(G, 'BO3CustomsMapTabs')
+    if type(tabs) == 'table' and type(tabs.logs) == 'table' then
+      while #Lobby.pending > 0 and #tabs.logs < 200 do
+        tabs.logs[#tabs.logs + 1] = table.remove(Lobby.pending, 1)
+      end
+    end
+  end
+  step('register', register)
+  step('red check', wrapRed)
+  step('name cards', wrapNames)
+  step('ping', wrapPing)
+  step('daily challenge', wrapChallenges)
+  step('start check', wrapLaunch)
+  step('pause menu', watchPause)
+  step('player menu', wrapDetails)
+  step('profile', wrapProfile)
+  step('ban check', enforceBans)
+  step('promote', promoteLater)
+  local version = ask('mapsversion')
+  if version ~= Lobby.version then
+    Lobby.version = version
+    local _, model = nextMap()
+    if model ~= nil and type(engine.ForceNotifyModelSubscriptions) == 'function' then
+      pcall(engine.ForceNotifyModelSubscriptions, model)
+    end
+  end
+end
+
+pcall(Lobby.tick)
+)LUA";
+
 static const char k_tickLua[] =
     "local tick = rawget(_G, 'BO3CustomsTick')\n"
-    "if tick ~= nil then tick() end\n";
+    "if tick ~= nil then tick() end\n"
+    "local lobby = rawget(_G, 'BO3CustomsLobbyMaps')\n"
+    "if lobby ~= nil and lobby.tick ~= nil then pcall(lobby.tick) end\n";
+
+static const char k_lobbyTickLua[] =
+    "local lobby = rawget(_G, 'BO3CustomsLobbyMaps')\n"
+    "if lobby ~= nil and lobby.tick ~= nil then pcall(lobby.tick) end\n";
 
 #ifdef _DEBUG
 static const char k_logFlushLua[] =
@@ -195,12 +982,25 @@ static const char k_isPcLua[] =
 
 static const char k_pcUtilityLua[] =
     "local G = _G\n"
-    "if rawget(G, 'BO3CustomsPCUtility') ~= nil then return end\n"
     "local cod = rawget(G, 'CoD')\n"
     "if type(cod) ~= 'table' then return end\n"
-    "rawset(G, 'BO3CustomsPCUtility', true)\n"
-    "local ok, err = pcall(require, 'ui.t7.utility.pcutility')\n"
+    "local function ready(util)\n"
+    "  return type(util) == 'table' and type(rawget(util, 'GetOptionInfo')) == 'function'\n"
+    "end\n"
     "local util = rawget(cod, 'PCUtil')\n"
+    "if not ready(util) then\n"
+    "  local tries = rawget(G, 'BO3CustomsPCUtilityTries') or 0\n"
+    "  if tries >= 3 then return end\n"
+    "  rawset(G, 'BO3CustomsPCUtilityTries', tries + 1)\n"
+    "  if type(util) ~= 'table' and type(rawget(G, 'PCUtil')) == 'table' then rawset(cod, 'PCUtil', rawget(G, 'PCUtil')) end\n"
+    "  pcall(function() package.loaded['ui.t7.utility.pcutility'] = nil end)\n"
+    "  local ok, err = pcall(require, 'ui.t7.utility.pcutility')\n"
+    "  util = rawget(cod, 'PCUtil')\n"
+    "  local tabs = rawget(G, 'BO3CustomsMapTabs')\n"
+    "  if type(tabs) == 'table' and type(tabs.logs) == 'table' then\n"
+    "    tabs.logs[#tabs.logs + 1] = 'pcutility ' .. (ready(util) and 'loaded' or ('failed: ' .. tostring(err)))\n"
+    "  end\n"
+    "end\n"
     "if type(util) ~= 'table' then util = rawget(G, 'PCUtil') end\n"
     "if type(util) == 'table' then\n"
     "  rawset(G, 'PCUtil', util)\n"
@@ -306,6 +1106,619 @@ static const char k_zombieSeedLua[] =
     "if zombie.ZM_SUPPORT_BOARDS == nil then zombie.ZM_SUPPORT_BOARDS = { 'white' } end\n"
     "if zombie.ZM_SUPPORT_BOARDS_INDEX == nil then zombie.ZM_SUPPORT_BOARDS_INDEX = 1 end\n";
 
+static const char k_lobbyParityLua[] =
+    "local G = _G\n"
+    "if rawget(G, 'BO3CustomsLobbyParity') ~= nil then return end\n"
+    "local original = rawget(G, 'require')\n"
+    "if type(original) ~= 'function' then return end\n"
+    "rawset(G, 'BO3CustomsLobbyParity', true)\n"
+    "local function inner(t)\n"
+    "  if type(t) ~= 'table' then return nil end\n"
+    "  local original = rawget(t, '_originalTable')\n"
+    "  if type(original) == 'table' then return original end\n"
+    "  return t\n"
+    "end\n"
+    "local function level()\n"
+    "  local e = rawget(G, 'Engine')\n"
+    "  if e == nil or e.GetCurrentMap == nil then return nil end\n"
+    "  local ok, map = pcall(e.GetCurrentMap)\n"
+    "  if ok and type(map) == 'string' and map ~= '' and map ~= 'core_frontend' then return map end\n"
+    "  return nil\n"
+    "end\n"
+    "local function active()\n"
+    "  local mod = rawget(G, 'BO3CustomsActiveMod')\n"
+    "  if type(mod) == 'table' then return mod end\n"
+    "  return nil\n"
+    "end\n"
+    "local function modField(key)\n"
+    "  return function()\n"
+    "    local mod = active()\n"
+    "    if mod ~= nil and type(mod[key]) == 'string' and mod[key] ~= '' then return mod[key] end\n"
+    "    if level() ~= nil then return 'usermaps' end\n"
+    "    return ''\n"
+    "  end\n"
+    "end\n"
+    "local function yes() return true end\n"
+    "local function no() return false end\n"
+    "local function nothing() end\n"
+    "local utils = {\n"
+    "  Mods_Enabled = yes,\n"
+    "  Mods_IsModLoaded = function() return active() ~= nil end,\n"
+    "  Mods_IsUGC = function() return active() ~= nil end,\n"
+    "  Mods_IsUsingMods = function() return active() ~= nil or level() ~= nil end,\n"
+    "  Mods_IsUsingUsermap = function() return level() ~= nil end,\n"
+    "  Mods_Lists_IsInstalled = yes,\n"
+    "  Mods_LoadMod = nothing,\n"
+    "  Mods_UsingModsInternalName = modField('internal'),\n"
+    "  Mods_UsingModsUgcName = modField('ugc'),\n"
+    "  Mods_UsingModsVersion = function() return 0 end,\n"
+    "  Mods_UsingUsermapUgcName = function() return level() or '' end,\n"
+    "  IsStarterPack = no,\n"
+    "  IsStarterPackParty = no,\n"
+    "  IsCustomGameTarget = no,\n"
+    "  IsPartyMemberMissingRequiredChunk = no,\n"
+    "  isHost = yes,\n"
+    "  isOnlineGame = no,\n"
+    "  isRankedGame = no,\n"
+    "  QuitGame = nothing,\n"
+    "  SetNetworkMode = nothing,\n"
+    "  ShowPasswordInput = nothing,\n"
+    "  HandleSteamClientPasswordComplete = nothing,\n"
+    "  GetSteamServerPasswordModel = nothing\n"
+    "}\n"
+    "local utilsDone = false\n"
+    "local function patchUtils()\n"
+    "  if utilsDone then return end\n"
+    "  local lu = inner(rawget(G, 'LuaUtils'))\n"
+    "  if lu == nil then return end\n"
+    "  for name, fn in pairs(utils) do\n"
+    "    if rawget(lu, name) == nil then rawset(lu, name, fn) end\n"
+    "  end\n"
+    "  utilsDone = true\n"
+    "end\n"
+    "local pcChildren = {\n"
+    "  buttonprompt = { 'keyshortcut' },\n"
+    "  ChooseCharacterLoadout_ButtonFooter_BackOfCard = { 'clickableButton' },\n"
+    "  ChooseCharacterLoadout_ButtonFooter_Personalize = { 'clickableButton' },\n"
+    "  ChooseCharacterLoadout_CardBack_FrontOfCardFooter = { 'clickableButton' },\n"
+    "  ChooseCharacterLoadout_CardBack_Transmission = { 'audioPromptPC' },\n"
+    "  ChooseTaunts_TauntOptionInfo = { 'clickButton' },\n"
+    "  CraftActionButton = { 'icon' },\n"
+    "  CraftActionSlider = { 'icon' },\n"
+    "  DemoControlsSpectatingBar = { 'leftBumper', 'rightBumper' },\n"
+    "  DemoPlaybackControlsButtons = { 'alignment1', 'alignment2', 'alignment3' },\n"
+    "  EmblemLayerContainer = { 'FETitleNumBrdr1' },\n"
+    "  FaceButtonThatHidesWithLabel = { 'clickButton' },\n"
+    "  fe_FooterContainer = { 'StarterPackWatermark' },\n"
+    "  fe_FooterContainer_NOTLobby = { 'StarterPackWatermark' },\n"
+    "  FE_List1ButtonLarge_PH = { 'DownloadingImage', 'FEVialBreadcrumb', 'RestrictedImage', 'UpgradeImage' },\n"
+    "  FE_ListAdditonal = { 'SplitscreenLobbyButtonPC' },\n"
+    "  fe_RightContainer = { 'Image000', 'ServerBrowserPrompt' },\n"
+    "  FooterButtonDoublePrompts = { 'BumperButtonWithKeyMouseLeft', 'BumperButtonWithKeyMouseRight' },\n"
+    "  FR_DpadWidget = { 'RespawnButtonPromptPC', 'RestartTrackButtonPromptPC' },\n"
+    "  LobbyMember = { 'LobbyMemberMP45' },\n"
+    "  LobbyMemberTeamSwitcher = { 'BumperButtonWithKeyMouseLeft', 'BumperButtonWithKeyMouseRight' },\n"
+    "  MegaChewFactoryBuyDivinium = { 'clickButton' },\n"
+    "  OptionDropdown = { 'frameOutline' },\n"
+    "  PaintjobSelectorItem = { 'UnavailableText' },\n"
+    "  PaintshopChoosePaintSide = { 'leftButton', 'rightButton' },\n"
+    "  PlaylistDLC1CRM = { 'Keyshortcut' },\n"
+    "  StartMenu_Options_PC_GamepadControls = { 'gamepadText', 'splitscreenText' },\n"
+    "  StartMenu_Options_PC_Graphics_Game = { 'StartMenuOptionsGraphicsColorBlindMinimapPreview0' },\n"
+    "  WeaponCustomizationSelect = { 'XCamMouseControl' },\n"
+    "  WeaponPreviewPane = { 'XCamMouseControl' },\n"
+    "  XpBarContainer = { 'starterPackXPNotice' },\n"
+    "}\n"
+    "local aliases = {}\n"
+    "local rebuild = {}\n"
+    "rebuild.matchSettingsInfo = function(element, menu, controller)\n"
+    "  local old = element.Description\n"
+    "  if old == nil or old.textBox ~= nil then return end\n"
+    "  local cod = rawget(G, 'CoD')\n"
+    "  local boxClass = rawget(cod, 'verticalScrollingTextBox')\n"
+    "  if type(boxClass) ~= 'table' or type(boxClass.new) ~= 'function' then\n"
+    "    old.textBox = old\n"
+    "    return\n"
+    "  end\n"
+    "  local box = boxClass.new(menu, controller)\n"
+    "  box:setLeftRight(true, false, 4, 465)\n"
+    "  box:setTopBottom(true, false, 383, 563)\n"
+    "  box.textBox:setTTF('fonts/RefrigeratorDeluxe-Regular.ttf')\n"
+    "  box.textBox:setAlignment(Enum.LUIAlignment.LUI_ALIGNMENT_LEFT)\n"
+    "  box:linkToElementModel(element, 'description', true, function(model)\n"
+    "    local value = Engine.GetModelValue(model)\n"
+    "    if value then box.textBox:setText(Engine.Localize(value)) end\n"
+    "  end)\n"
+    "  element:addElement(box)\n"
+    "  old:setAlpha(0)\n"
+    "  element.Description = box\n"
+    "end\n"
+    "for name in pairs(rebuild) do\n"
+    "  if pcChildren[name] == nil then pcChildren[name] = {} end\n"
+    "end\n"
+    "local wrapped = {}\n"
+    "local function standIn(widget, name)\n"
+    "  local lui = rawget(G, 'LUI')\n"
+    "  local holder = lui.UIElement.new()\n"
+    "  holder:setAlpha(0)\n"
+    "  local label = lui.UIText.new()\n"
+    "  label:setAlpha(0)\n"
+    "  holder:addElement(label)\n"
+    "  holder.label = label\n"
+    "  widget:addElement(holder)\n"
+    "  widget[name] = holder\n"
+    "end\n"
+    "local function patchWidgets()\n"
+    "  local cod = rawget(G, 'CoD')\n"
+    "  if type(cod) ~= 'table' or rawget(G, 'LUI') == nil then return end\n"
+    "  for name, kids in pairs(pcChildren) do\n"
+    "    local widget = rawget(cod, name)\n"
+    "    local make = type(widget) == 'table' and rawget(widget, 'new') or nil\n"
+    "    if type(make) == 'function' and wrapped[name] ~= make then\n"
+    "      local built = function(...)\n"
+    "        local element = make(...)\n"
+    "        if element ~= nil then\n"
+    "          if rebuild[name] ~= nil then pcall(rebuild[name], element, ...) end\n"
+    "          local alias = aliases[name]\n"
+    "          if alias ~= nil then\n"
+    "            for child, field in pairs(alias) do\n"
+    "              pcall(function()\n"
+    "                local owner = element[child]\n"
+    "                if owner ~= nil and owner[field] == nil then owner[field] = owner end\n"
+    "              end)\n"
+    "            end\n"
+    "          end\n"
+    "          for i = 1, #kids do\n"
+    "            local ok, have = pcall(function() return element[kids[i]] end)\n"
+    "            if ok and have == nil then pcall(standIn, element, kids[i]) end\n"
+    "          end\n"
+    "        end\n"
+    "        return element\n"
+    "      end\n"
+    "      rawset(widget, 'new', built)\n"
+    "      wrapped[name] = built\n"
+    "    end\n"
+    "  end\n"
+    "end\n"
+    "local native = {\n"
+    "  UIElement = { 'setAlpha', 'setRGB', 'setScale', 'setXRot', 'setYRot', 'setZRot', 'setImage', 'setTTF',\n"
+    "    'setupReticle', 'setLeftRight', 'setTopBottom', 'setMaterial', 'setPriority', 'setZoom', 'setText' },\n"
+    "  UIText = { 'setText', 'setTTF', 'setRGB', 'setAlpha', 'setScale' },\n"
+    "  UIImage = { 'setImage', 'setMaterial', 'setRGB', 'setAlpha', 'setScale' }\n"
+    "}\n"
+    "local nativeDone = {}\n"
+    "local function patchLui()\n"
+    "  local lui = rawget(G, 'LUI')\n"
+    "  if type(lui) ~= 'table' then return end\n"
+    "  for class, names in pairs(native) do\n"
+    "    local cls = rawget(lui, class)\n"
+    "    if not nativeDone[class] and type(cls) == 'table' and type(rawget(cls, 'new')) == 'function' then\n"
+    "      nativeDone[class] = true\n"
+    "      local ok, probe = pcall(cls.new)\n"
+    "      if ok and probe ~= nil then\n"
+    "        for i = 1, #names do\n"
+    "          local name = names[i]\n"
+    "          local found, fn = pcall(function() return probe[name] end)\n"
+    "          if found and type(fn) == 'function' and rawget(cls, name) == nil then rawset(cls, name, fn) end\n"
+    "        end\n"
+    "      end\n"
+    "    end\n"
+    "  end\n"
+    "end\n"
+    "local watched = {}\n"
+    "local function patchWatch()\n"
+    "  local engine = rawget(G, 'Engine')\n"
+    "  if type(engine) == 'table' and not watched.maps then\n"
+    "    watched.maps = true\n"
+    "    local function internal(name)\n"
+    "      if type(name) ~= 'string' or not string.find(name, '^%d+$') then return name end\n"
+    "      local maps = rawget(G, 'BO3CustomMaps')\n"
+    "      if type(maps) == 'table' then\n"
+    "        for i = 1, #maps do\n"
+    "          if maps[i].ugc == name then return maps[i].id end\n"
+    "        end\n"
+    "      end\n"
+    "      return name\n"
+    "    end\n"
+    "    for _, key in ipairs({ 'GameLobbySetMap', 'IsMapValid' }) do\n"
+    "      local original = engine[key]\n"
+    "      if type(original) == 'function' then\n"
+    "        rawset(engine, key, function(map, ...)\n"
+    "          return original(internal(map), ...)\n"
+    "        end)\n"
+    "      end\n"
+    "    end\n"
+    "  end\n"
+    "end\n"
+    "local function patch()\n"
+    "  pcall(patchWatch)\n"
+    "  pcall(patchUtils)\n"
+    "  pcall(patchWidgets)\n"
+    "  pcall(patchLui)\n"
+    "  local data = inner(rawget(G, 'LobbyData'))\n"
+    "  if data == nil then return end\n"
+    "  local targets = inner(rawget(data, 'UITargets'))\n"
+    "  if type(targets) ~= 'table' or rawget(targets, 'UI_MPLOBBYONLINEMODGAME') ~= nil then return end\n"
+    "  local custom = rawget(targets, 'UI_MPLOBBYONLINECUSTOMGAME')\n"
+    "  if type(custom) ~= 'table' then return end\n"
+    "  local target = {}\n"
+    "  for key, value in pairs(custom) do target[key] = value end\n"
+    "  target.id = 320\n"
+    "  target.name = 'MPLobbyOnlineModGame'\n"
+    "  target.title = 'MENU_CUSTOMGAMES_CAPS'\n"
+    "  target.kicker = ''\n"
+    "  target.room = 'mp_custom'\n"
+    "  rawset(targets, 'UI_MPLOBBYONLINEMODGAME', target)\n"
+    "end\n"
+    "local function modOwned(name)\n"
+    "  local files = rawget(G, 'BO3CustomsModFiles')\n"
+    "  if type(files) ~= 'table' or type(name) ~= 'string' then return false end\n"
+    "  return files[string.lower(string.gsub(name, '%.', '/')) .. '.lua'] ~= nil\n"
+    "end\n"
+    "rawset(G, 'require', function(name, ...)\n"
+    "  pcall(patch)\n"
+    "  local cod = rawget(G, 'CoD')\n"
+    "  local was = type(cod) == 'table' and rawget(cod, 'isPC') or nil\n"
+    "  local function note(text)\n"
+    "    local tabs = rawget(G, 'BO3CustomsMapTabs')\n"
+    "    if type(tabs) == 'table' and type(tabs.logs) == 'table' then tabs.logs[#tabs.logs + 1] = text end\n"
+    "  end\n"
+    "  if rawget(G, 'BO3CustomsPCScope') then\n"
+    "    local ok, result = pcall(original, name, ...)\n"
+    "    if not ok then note('PC-only file ' .. tostring(name) .. ' did not load: ' .. tostring(result)) end\n"
+    "    pcall(patch)\n"
+    "    return result\n"
+    "  end\n"
+    "  if type(cod) ~= 'table' or was == true or not modOwned(name) then\n"
+    "    local result = original(name, ...)\n"
+    "    pcall(patch)\n"
+    "    return result\n"
+    "  end\n"
+    "  rawset(cod, 'isPC', true)\n"
+    "  rawset(G, 'BO3CustomsPCScope', true)\n"
+    "  local ok, result = pcall(original, name, ...)\n"
+    "  rawset(G, 'BO3CustomsPCScope', nil)\n"
+    "  rawset(cod, 'isPC', was)\n"
+    "  note('mod file ' .. name .. ' loaded as on PC' .. (ok and '' or (': ' .. tostring(result))))\n"
+    "  pcall(patch)\n"
+    "  if not ok then error(result, 0) end\n"
+    "  return result\n"
+    "end)\n";
+
+static const char k_dllStandInLua[] =
+    "local G = _G\n"
+    "local state = rawget(G, 'BO3CustomsDll')\n"
+    "if type(state) ~= 'table' then\n"
+    "  state = {}\n"
+    "  rawset(G, 'BO3CustomsDll', state)\n"
+    "end\n"
+    "local function nothing() end\n"
+    "if not state.libs then\n"
+    "  state.libs = true\n"
+    "  local slash = string.char(92)\n"
+    "  local function prefix(text, start)\n"
+    "    if type(start) ~= 'string' then return text end\n"
+    "    start = string.gsub(start, '[/' .. slash .. ']+$', '')\n"
+    "    if start ~= '' and string.lower(string.sub(text, 1, #start)) == string.lower(start) then\n"
+    "      return string.sub(text, #start + 1)\n"
+    "    end\n"
+    "    return text\n"
+    "  end\n"
+    "  local function dvar(name)\n"
+    "    local engine = rawget(G, 'Engine')\n"
+    "    if type(engine) ~= 'table' or type(engine.GetDvarString) ~= 'function' then return nil end\n"
+    "    local ok, value = pcall(engine.GetDvarString, name)\n"
+    "    if ok then return value end\n"
+    "    return nil\n"
+    "  end\n"
+    "  local function place(name)\n"
+    "    local folder = rawget(G, 'BO3CustomsDllSave')\n"
+    "    if type(name) ~= 'string' or type(folder) ~= 'string' or folder == '' then return name end\n"
+    "    if string.sub(name, 1, #folder) == folder or string.sub(name, 1, 18) == '/data/BO3-Customs/' then return name end\n"
+    "    name = prefix(prefix(name, dvar('fs_homepath')), dvar('fs_basepath'))\n"
+    "    name = string.gsub(name, '^[/' .. slash .. ']+', '')\n"
+    "    local flat = string.gsub(name, '^%.[/' .. slash .. ']+', '')\n"
+    "    flat = string.gsub(flat, '[/' .. slash .. ':]', '_')\n"
+    "    return folder .. flat\n"
+    "  end\n"
+    "  local function fixIo(lib)\n"
+    "    if type(lib) ~= 'table' then lib = {} end\n"
+    "    if rawget(lib, 'BO3CustomsOpen') ~= nil then return lib end\n"
+    "    local open = rawget(lib, 'open')\n"
+    "    local lines = rawget(lib, 'lines')\n"
+    "    if type(open) ~= 'function' then open = nothing end\n"
+    "    pcall(rawset, lib, 'BO3CustomsOpen', open)\n"
+    "    pcall(rawset, lib, 'open', function(name, mode) return open(place(name), mode) end)\n"
+    "    if type(lines) == 'function' then\n"
+    "      pcall(rawset, lib, 'lines', function(name)\n"
+    "        if name == nil then return lines() end\n"
+    "        return lines(place(name))\n"
+    "      end)\n"
+    "    end\n"
+    "    return lib\n"
+    "  end\n"
+    "  local function openFile(name, mode)\n"
+    "    local lib = state.io or rawget(G, 'io')\n"
+    "    if type(lib) ~= 'table' then return nil end\n"
+    "    return rawget(fixIo(lib), 'BO3CustomsOpen')(place(name), mode)\n"
+    "  end\n"
+    "  local function quiet(known)\n"
+    "    return setmetatable(known, { __index = function() return nothing end })\n"
+    "  end\n"
+    "  local function stand(name, known)\n"
+    "    if rawget(G, name) == nil then rawset(G, name, quiet(known)) end\n"
+    "  end\n"
+    "  local dll = rawget(G, 'BO3CustomsDllMod') == true\n"
+    "  if dll then\n"
+    "  stand('T7Overcharged', {})\n"
+    "  stand('UIErrorHash', {})\n"
+    "  stand('DiscordRPC', {})\n"
+    "  stand('HotReload', {})\n"
+    "  stand('Console', {})\n"
+    "  stand('Axios', {})\n"
+    "  stand('FileIO', {\n"
+    "    FileExists = function(name)\n"
+    "      local file = openFile(name, 'rb')\n"
+    "      if file == nil then return false end\n"
+    "      file:close()\n"
+    "      return true\n"
+    "    end,\n"
+    "    ReadFile = function(name)\n"
+    "      local file = openFile(name, 'rb')\n"
+    "      if file == nil then return nil end\n"
+    "      local text = file:read('*a')\n"
+    "      file:close()\n"
+    "      return text\n"
+    "    end,\n"
+    "    WriteFile = function(name, text, append)\n"
+    "      local file = openFile(name, (append == true or append == 'true') and 'ab' or 'wb')\n"
+    "      if file == nil then return false end\n"
+    "      file:write(tostring(text or ''))\n"
+    "      file:close()\n"
+    "      return true\n"
+    "    end })\n"
+    "  stand('MainLUA', { Revision = function() return rawget(G, 'DLLREVISION') or 0 end,\n"
+    "    GetHardwareID = function() return '' end, GetHardwareCPU = function() return '' end })\n"
+    "  end\n"
+    "  local function loadlib() return nothing end\n"
+    "  local function fixPackage(lib)\n"
+    "    if type(lib) ~= 'table' then lib = {} end\n"
+    "    pcall(rawset, lib, 'loadlib', loadlib)\n"
+    "    return lib\n"
+    "  end\n"
+    "  local global = rawget(G, 'io')\n"
+    "  if type(global) == 'table' then fixIo(global) end\n"
+    "  local real = rawget(G, 'require')\n"
+    "  if type(real) == 'function' then\n"
+    "    rawset(G, 'require', function(name, ...)\n"
+    "      if name == 'package' or name == 'io' then\n"
+    "        local ok, lib = pcall(real, name)\n"
+    "        if not ok or type(lib) ~= 'table' then lib = rawget(G, name) end\n"
+    "        if name == 'package' then return dll and fixPackage(lib) or lib end\n"
+    "        lib = fixIo(lib)\n"
+    "        state.io = lib\n"
+    "        return lib\n"
+    "      end\n"
+    "      return real(name, ...)\n"
+    "    end)\n"
+    "  end\n"
+    "end\n"
+    "local engine = rawget(G, 'Engine')\n"
+    "if not state.engine and type(engine) == 'table' then\n"
+    "  state.engine = true\n"
+    "  rawset(engine, 'UsingModsUgcName', function()\n"
+    "    local mod = rawget(G, 'BO3CustomsActiveMod')\n"
+    "    if type(mod) == 'table' and type(mod.ugc) == 'string' and mod.ugc ~= '' then return mod.ugc end\n"
+    "    return rawget(G, 'BO3CustomsDllUgc') or ''\n"
+    "  end)\n"
+    "end\n";
+
+static const char k_pcParityLua[] =
+    "local G = _G\n"
+    "local function define(name, fn)\n"
+    "  if rawget(G, name) == nil then rawset(G, name, fn) end\n"
+    "end\n"
+    "local function yes() return true end\n"
+    "local function no() return false end\n"
+    "local function nothing() end\n"
+    "local function same(value) return value end\n"
+    "local function each(names, fn)\n"
+    "  for i = 1, #names do define(names[i], fn) end\n"
+    "end\n"
+    "define('MapImageToModPreview', function(id)\n"
+    "  local maps = rawget(G, 'BO3CustomMaps')\n"
+    "  if type(maps) == 'table' then\n"
+    "    for i = 1, #maps do\n"
+    "      if (maps[i].id == id or maps[i].ugc == id) and maps[i].preview ~= nil then return maps[i].preview end\n"
+    "    end\n"
+    "  end\n"
+    "  return id\n"
+    "end)\n"
+    "each({\n"
+    "  'GamepadsConnectedAny', 'GamepadsConnectedIsActive', 'IsGameModeOwned',\n"
+    "  'IsStarterPackWatermarkHidden', 'PaintshopEditAvailable'\n"
+    "}, yes)\n"
+    "each({\n"
+    "  'AllowGuestSplitScreenOnline', 'IsChunkDownloading', 'IsChunksRestrictedButtonByParty',\n"
+    "  'IsFilterActive', 'IsRestrictedButtonByParty', 'IsServerBrowserEnabled',\n"
+    "  'IsSplitscreenLobbyRoomAvailable', 'IsSplitscreenPlayAvailable', 'IsSplitscreenPlayerSignedIn',\n"
+    "  'IsStarterPackMaxLevel', 'IsStarterPackNotAvailableButton', 'IsStarterPackRestrictedButton',\n"
+    "  'IsStarterPackRestrictedButtonByParty', 'IsSteamServerBrowserEmpty', 'IsSteamServerBrowserUpdating',\n"
+    "  'PartyMemberMissingContent', 'SteamServerIsCurrentServerTypeFavorites',\n"
+    "  'SteamServerIsCurrentServerTypeHistory', 'SteamServerSortMatchesHeaderAscending',\n"
+    "  'SteamServerSortMatchesHeaderDescending'\n"
+    "}, no)\n"
+    "local function lobbyAction(name)\n"
+    "  define(name, function(self, element, controller, param, menu)\n"
+    "    local cod = rawget(G, 'CoD')\n"
+    "    local base = type(cod) == 'table' and rawget(cod, 'LobbyBase') or nil\n"
+    "    local fn = type(base) == 'table' and base[name] or nil\n"
+    "    if type(fn) == 'function' then return fn(self, controller) end\n"
+    "  end)\n"
+    "end\n"
+    "lobbyAction('OpenServerSettings')\n"
+    "lobbyAction('OpenBotSettings')\n"
+    "each({\n"
+    "  'CheckNavRestrictions', 'DisableMouseButtonOnElement', 'DisableMouseOnElement',\n"
+    "  'DisableMouseOnMenuElement', 'EnableMouseOnElement', 'EnableMouseOnMenuElement', 'HideMouseCursor',\n"
+    "  'JoinServerBrowser', 'LobbySplitscreenToggle', 'OpenServerBrowser', 'OpenServerBrowserFilters',\n"
+    "  'RefreshLobbyServerBrowser', 'ServerBrowserCancelRequest',\n"
+    "  'ServerBrowserQuickRefresh', 'ServerBrowserRefreshServer', 'ServerBrowserRequestPlayersList',\n"
+    "  'ServerBrowserSetFavorite', 'ServerBrowserToggleFilter', 'ServerFiltersEditKeywords',\n"
+    "  'ServerFiltersHandleKeyboardComplete', 'ServerSettingsEditDescription', 'ServerSettingsEditName',\n"
+    "  'ServerSettingsEditPassword', 'ServerSettingsHandleKeyboardComplete',\n"
+    "  'SetCompetitiveAttachmentSettingsTab', 'SetCompetitiveItemSettingsFilter', 'SetGameSettingsTab',\n"
+    "  'SetNetworkMode', 'SetPregameVoteFilter', 'ShouldUnloadMod', 'ShowMouseCursor',\n"
+    "  'StarterParckPurchase', 'StoreButtonOpenSteamStore', 'UIKeyboardCancel', 'UIKeyboardComplete'\n"
+    "}, nothing)\n"
+    "each({\n"
+    "  'GetAARXPNextLevel', 'GetAARXPStarterPackNotice', 'GetAARXpEarned', 'GetGameTypeDisplayString',\n"
+    "  'SecondsAsTimePlayedStringShort', 'TruncateString', 'TruncateTo32Chars', 'TruncateTo64Chars'\n"
+    "}, same)\n"
+    "local enums = rawget(G, 'LuaEnums')\n"
+    "if type(enums) == 'table' then\n"
+    "  if enums.MODS_BASE_PATH == nil then pcall(rawset, enums, 'MODS_BASE_PATH', 'mods') end\n"
+    "  if enums.USERMAP_BASE_PATH == nil then pcall(rawset, enums, 'USERMAP_BASE_PATH', 'usermaps') end\n"
+    "end\n"
+    "local cod = rawget(G, 'CoD')\n"
+    "if type(cod) == 'table' then\n"
+    "  local function zero() return 0 end\n"
+    "  local function field(owner, name, fn)\n"
+    "    local at = rawget(cod, owner)\n"
+    "    if type(at) == 'table' and rawget(at, name) == nil then pcall(rawset, at, name, fn) end\n"
+    "  end\n"
+    "  field('AARUtility', 'EstimateEarnedXP', zero)\n"
+    "  field('LobbyBase', 'LobbyQuitOrLeaveParty', nothing)\n"
+    "  field('LobbyBase', 'OpenServerSettings', function(self, controller)\n"
+    "    local base = rawget(cod, 'LobbyBase')\n"
+    "    local lui = rawget(G, 'LUI')\n"
+    "    if type(lui) ~= 'table' or type(lui.createMenu) ~= 'table' then return nil end\n"
+    "    if lui.createMenu.ServerSettings == nil then pcall(require, 'ui.uieditor.menus.PC.ServerSettings') end\n"
+    "    if type(lui.createMenu.ServerSettings) ~= 'function' or type(rawget(G, 'OpenOverlay')) ~= 'function' then return nil end\n"
+    "    local activity = type(base.LeaderActivity) == 'table' and base.LeaderActivity.EDITING_GAME_RULES or nil\n"
+    "    if activity ~= nil and type(base.SetLeaderActivity) == 'function' then pcall(base.SetLeaderActivity, controller, activity) end\n"
+    "    local menu = OpenOverlay(self, 'ServerSettings', controller)\n"
+    "    if menu ~= nil and type(base.ResetLeaderActivity) == 'function' and type(lui.OverrideFunction_CallOriginalFirst) == 'function' then\n"
+    "      lui.OverrideFunction_CallOriginalFirst(menu, 'close', function() base.ResetLeaderActivity(controller) end)\n"
+    "    end\n"
+    "    return menu\n"
+    "  end)\n"
+    "  field('LobbyBase', 'SplitscreenLobbyRoomAvailable', no)\n"
+    "  field('LobbyBase', 'SplitscreenPlayAvailable', no)\n"
+    "  field('LobbyBase', 'UGCActivity', nothing)\n"
+    "  field('LobbyMenus', 'MPButtonsModGame', nothing)\n"
+    "  field('LobbyUtility', 'BitsToComplainAbout', zero)\n"
+    "  field('LobbyUtility', 'RequiredDLCMaskForPlaylist', zero)\n"
+    "  field('PrestigeUtility', 'ResetForStarterPack', nothing)\n"
+    "  local numbers = { CONTENT_MODS_INDEX = 999, GAMEMODE_FREERUN = 4, GAMEMODE_MANUAL_PLAYLIST = 6 }\n"
+    "  for key, value in pairs(numbers) do\n"
+    "    if rawget(cod, key) == nil then pcall(rawset, cod, key, value) end\n"
+    "  end\n"
+    "end\n"
+    "local engine = rawget(G, 'Engine')\n"
+    "if type(engine) ~= 'table' then return end\n"
+    "local function entries(path)\n"
+    "  local list, count = {}, 0\n"
+    "  if path == 'mods' then\n"
+    "    local mods = rawget(G, 'BO3CustomMods')\n"
+    "    if type(mods) == 'table' then\n"
+    "      for i = 1, #mods do\n"
+    "        local mod = mods[i]\n"
+    "        list[count] = { name = mod.title, internalName = mod.internal, ugcName = mod.ugc, description = '', folder = mod.name }\n"
+    "        count = count + 1\n"
+    "      end\n"
+    "    end\n"
+    "  else\n"
+    "    local maps = rawget(G, 'BO3CustomMaps')\n"
+    "    if type(maps) == 'table' then\n"
+    "      for i = 1, #maps do\n"
+    "        local map = maps[i]\n"
+    "        list[count] = { name = map.name, internalName = map.id, ugcName = map.ugc or map.id, description = map.desc or '' }\n"
+    "        count = count + 1\n"
+    "      end\n"
+    "    end\n"
+    "  end\n"
+    "  return list, count\n"
+    "end\n"
+    "local function native(name, fn)\n"
+    "  if rawget(engine, name) == nil then rawset(engine, name, fn) end\n"
+    "end\n"
+    "native('IsZmOwned', yes)\n"
+    "native('IsMpOwned', yes)\n"
+    "native('IsCpOwned', yes)\n"
+    "native('Mods_Lists_GetInfoEntriesCount', function(path)\n"
+    "  local list, count = entries(path)\n"
+    "  return count\n"
+    "end)\n"
+    "native('Mods_Lists_GetInfoEntries', function(path)\n"
+    "  local list = entries(path)\n"
+    "  return list\n"
+    "end)\n"
+    "if rawget(G, 'BO3CustomsQuit') == nil and type(rawget(engine, 'Exec')) == 'function' then\n"
+    "  local run = rawget(engine, 'Exec')\n"
+    "  rawset(G, 'BO3CustomsQuit', true)\n"
+    "  rawset(engine, 'Exec', function(controller, command, ...)\n"
+    "    if type(command) == 'string' and string.match(string.lower(command), '^%s*quit%s*;?%s*$') then\n"
+    "      return engine.SetDvar('bo3customs_quit', 1)\n"
+    "    end\n"
+    "    return run(controller, command, ...)\n"
+    "  end)\n"
+    "end\n"
+    "local enum = rawget(G, 'Enum')\n"
+    "local function plain(t)\n"
+    "  if type(t) ~= 'table' then return nil end\n"
+    "  local original = rawget(t, '_originalTable')\n"
+    "  if type(original) == 'table' then return original end\n"
+    "  return t\n"
+    "end\n"
+    "local kinds = plain(type(enum) == 'table' and enum.KeyboardType or nil)\n"
+    "local lui = rawget(G, 'LUI')\n"
+    "local element = type(lui) == 'table' and rawget(lui, 'UIElement') or nil\n"
+    "if type(kinds) ~= 'table' or type(element) ~= 'table' or rawget(G, 'BO3CustomsKeyboards') ~= nil then return end\n"
+    "local stand = kinds.KEYBOARD_TYPE_GROUP_SEARCH_NAME or kinds.KEYBOARD_TYPE_TEXT_MESSAGE\n"
+    "local exec = rawget(engine, 'Exec')\n"
+    "local register = rawget(element, 'registerEventHandler')\n"
+    "if type(stand) ~= 'number' or type(exec) ~= 'function' or type(register) ~= 'function' then return end\n"
+    "local keyboards = { pc = {}, pending = nil, next = 1000 }\n"
+    "rawset(G, 'BO3CustomsKeyboards', keyboards)\n"
+    "local function add(name)\n"
+    "  if rawget(kinds, name) ~= nil then return rawget(kinds, name) end\n"
+    "  local value = keyboards.next\n"
+    "  keyboards.next = value + 1\n"
+    "  if pcall(rawset, kinds, name, value) then keyboards.pc[value] = name end\n"
+    "  return rawget(kinds, name)\n"
+    "end\n"
+    "for _, name in ipairs({ 'KEYBOARD_TYPE_SERVER_NAME', 'KEYBOARD_TYPE_SERVER_DESCRIPTION', 'KEYBOARD_TYPE_SERVER_PASSWORD',\n"
+    "  'KEYBOARD_TYPE_SERVER_CLIENT_PASSWORD', 'KEYBOARD_TYPE_SERVER_FILTER_KEYWORDS' }) do add(name) end\n"
+    "pcall(setmetatable, kinds, { __index = function(t, key)\n"
+    "  if type(key) == 'string' and string.sub(key, 1, 14) == 'KEYBOARD_TYPE_' then return add(key) end\n"
+    "  return nil\n"
+    "end })\n"
+    "rawset(engine, 'Exec', function(controller, command, ...)\n"
+    "  if type(command) == 'string' then\n"
+    "    local kind = tonumber(string.match(command, '^%s*ui_keyboard_new%s+(%d+)'))\n"
+    "    if kind ~= nil and keyboards.pc[kind] ~= nil then\n"
+    "      keyboards.pending = kind\n"
+    "      command = 'ui_keyboard_new ' .. stand\n"
+    "    elseif kind ~= nil then\n"
+    "      keyboards.pending = nil\n"
+    "    end\n"
+    "  end\n"
+    "  return exec(controller, command, ...)\n"
+    "end)\n"
+    "rawset(element, 'registerEventHandler', function(self, name, handler, ...)\n"
+    "  if name == 'ui_keyboard_input' and type(handler) == 'function' then\n"
+    "    local original = handler\n"
+    "    handler = function(target, event, ...)\n"
+    "      if type(event) == 'table' and keyboards.pending ~= nil and event.type == stand then\n"
+    "        event.type = keyboards.pending\n"
+    "      end\n"
+    "      return original(target, event, ...)\n"
+    "    end\n"
+    "  end\n"
+    "  return register(self, name, handler, ...)\n"
+    "end)\n";
+
 static uintptr_t g_base = 0;
 static uint32_t  g_ticks = 0;
 static bool      g_forceInject = false;
@@ -314,6 +1727,8 @@ static uintptr_t g_mouseState = 0;
 
 static Detour g_addMenuDetour{};
 static void*  g_addMenuOriginal = nullptr;
+static Detour g_requireDetour{};
+static void*  g_requireOriginal = nullptr;
 static Detour g_findAssetDetour{};
 static void*  g_findAssetOriginal = nullptr;
 
@@ -584,6 +1999,16 @@ static void HandleModApply()
     T7Maps_RequestApply();
 }
 
+static void HandleQuit()
+{
+    if (!DvarOn("bo3customs_quit"))
+        return;
+
+    SetDvar("bo3customs_quit", "0");
+    T7Log_Write("[Cmd] quit: closing the game");
+    sceSystemServiceLoadExec("exit", nullptr);
+}
+
 #ifdef _DEBUG
 static void FlushLuaLog()
 {
@@ -650,7 +2075,7 @@ static void ShowShare()
                 RunLua(k_shareUiLua, "=bo3customs_share_ui");
             }
 
-            char lua[1280];
+            char lua[1792];
             size_t used = (size_t)snprintf(lua, sizeof(lua), "%s",
                                            "local share = rawget(_G, 'BO3CustomsShare')\n"
                                            "if share ~= nil and share.Show ~= nil then share.Show(");
@@ -663,6 +2088,8 @@ static void ShowShare()
 
             used += (size_t)snprintf(lua + used, sizeof(lua) - used, "%d / 1000, ", (int)(status.fraction * 1000.0f));
             AppendQuoted(lua, sizeof(lua), &used, status.failed ? "" : "Press Circle to cancel and leave the lobby");
+            used += (size_t)snprintf(lua + used, sizeof(lua) - used, ", ");
+            AppendQuoted(lua, sizeof(lua), &used, status.speeds);
             snprintf(lua + used, sizeof(lua) - used, ") end\n");
             shown = RunLua(lua, "=bo3customs_share_show") || shown;
         }
@@ -714,6 +2141,7 @@ static void InjectScripts()
         HandleUninstall();
         HandleModChoice();
         HandleModApply();
+        HandleQuit();
         RunLua(k_tickLua, "=bo3customs_tick");
 #ifdef _DEBUG
         FlushLuaLog();
@@ -1140,6 +2568,39 @@ static void PollGraphics()
     ApplySplitScreen();
 }
 
+static int OpenLuiCopy(const char* asset)
+{
+    char lower[160];
+    size_t n = 0;
+    int folders = 0;
+    size_t cut = 0;
+
+    for (; asset[n] && n < sizeof(lower) - 1; ++n)
+    {
+        const char c = asset[n];
+        lower[n] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (c == '\\' ? '/' : c);
+
+        if (lower[n] == '/' && ++folders == kLuiMaxFolders)
+            cut = n;
+    }
+
+    lower[n] = 0;
+
+    const char* const slash = strrchr(lower, '/');
+
+    if (folders > kLuiMaxFolders && slash)
+        memmove(lower + cut, slash, strlen(slash) + 1);
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/lui/%s", "/data/BO3-Customs", lower);
+    const int fd = sceKernelOpen(path, SCE_KERNEL_O_RDONLY, 0);
+
+    if (fd < 0 && fd != (int)0x80020002)
+        T7Log_Write("[Lua] %s could not be opened (0x%08X)", path, (uint32_t)fd);
+
+    return fd;
+}
+
 static LuiFile g_luiFiles[] =
 {
     { "ui/t7/utility/pcutility.lua", nullptr, 0, false },
@@ -1170,10 +2631,7 @@ static const RawFileAsset* LuiFileFor(const char* name)
         {
             file.tried = true;
 
-            char path[256];
-            snprintf(path, sizeof(path), "%s/lui/%s", "/data/BO3-Customs", file.asset);
-
-            const int fd = sceKernelOpen(path, SCE_KERNEL_O_RDONLY, 0);
+            const int fd = OpenLuiCopy(file.asset);
 
             if (fd < 0)
                 return nullptr;
@@ -1214,6 +2672,124 @@ static const RawFileAsset* LuiFileFor(const char* name)
     return nullptr;
 }
 
+struct LuiExtra
+{
+    char         name[160];
+    RawFileAsset asset;
+    bool         found;
+};
+
+constexpr int kLuiExtraMax = 96;
+
+static LuiExtra          g_luiExtra[kLuiExtraMax] = {};
+static int               g_luiExtraCount = 0;
+static std::atomic<bool> g_luiExtraLock{false};
+
+static bool LuaMissing(uint64_t result)
+{
+    if (!result || !RangeReadable(result, sizeof(RawFileAsset)))
+        return true;
+
+    const RawFileAsset* const raw = (const RawFileAsset*)result;
+    return !raw->buffer || raw->length <= 0;
+}
+
+static const RawFileAsset* LuiExtraFor(const char* name)
+{
+    char lower[160];
+    size_t n = 0;
+
+    for (; name[n] && n < sizeof(lower) - 1; ++n)
+    {
+        const char c = name[n];
+        lower[n] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : (c == '\\' ? '/' : c);
+    }
+
+    lower[n] = 0;
+
+    if (name[n] || strstr(lower, ".."))
+        return nullptr;
+
+    while (g_luiExtraLock.exchange(true, std::memory_order_acquire))
+        sceKernelUsleep(50);
+
+    const RawFileAsset* served = nullptr;
+    bool known = false;
+
+    for (int i = 0; i < g_luiExtraCount && !known; ++i)
+    {
+        if (strcmp(g_luiExtra[i].name, lower) == 0)
+        {
+            known = true;
+            served = g_luiExtra[i].found ? &g_luiExtra[i].asset : nullptr;
+        }
+    }
+
+    if (!known && g_luiExtraCount < kLuiExtraMax)
+    {
+        LuiExtra& extra = g_luiExtra[g_luiExtraCount];
+        snprintf(extra.name, sizeof(extra.name), "%s", lower);
+        extra.found = false;
+
+        int fd = OpenLuiCopy(lower);
+        const char* problem = fd < 0 ? "there is no copy in lui" : nullptr;
+
+        if (fd >= 0)
+        {
+            constexpr int64_t kMax = 1024 * 1024;
+            const int64_t size = sceKernelLseek(fd, 0, SEEK_END);
+            char* body = nullptr;
+            int64_t used = 0;
+
+            if (size <= 0 || size > kMax || sceKernelLseek(fd, 0, SEEK_SET) != 0)
+                problem = "its copy in lui could not be sized";
+            else if ((body = (char*)malloc((size_t)size + 1)) == nullptr)
+                problem = "there was no memory for its copy in lui";
+
+            while (body != nullptr && used < size)
+            {
+                const int64_t read = sceKernelRead(fd, body + used, (size_t)(size - used));
+
+                if (read <= 0)
+                    break;
+
+                used += read;
+            }
+
+            sceKernelClose(fd);
+
+            if (body != nullptr && used == size)
+            {
+                body[used] = 0;
+                extra.asset.name = extra.name;
+                extra.asset.length = (int32_t)used;
+                extra.asset.padding = 0;
+                extra.asset.buffer = body;
+                extra.found = true;
+            }
+            else
+            {
+                if (body != nullptr)
+                    problem = "its copy in lui could not be read";
+
+                free(body);
+            }
+        }
+
+        if (extra.found)
+            T7Log_Write("[Lua] %s is not in the PS4 game; using the PC copy in lui", lower);
+        else
+            T7Log_Write("[Lua] %s is not in the PS4 game and %s", lower, problem ? problem : "its copy in lui is empty");
+        served = extra.found ? &extra.asset : nullptr;
+
+        if (extra.found || fd < 0)
+            ++g_luiExtraCount;
+    }
+
+    g_luiExtraLock.store(false, std::memory_order_release);
+    return served;
+}
+
 static uint64_t FindXAsset(uint64_t type, uint64_t name, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
                            double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
 {
@@ -1246,6 +2822,28 @@ static uint64_t FindXAsset(uint64_t type, uint64_t name, uint64_t a3, uint64_t a
     const uint64_t result =
         ((Passthrough_t)g_findAssetOriginal)(type, name, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
 
+    if (!result && (int32_t)type == kRawFileType && name != 0 &&
+        (uintptr_t)__builtin_return_address(0) == g_base + kExecFindReturn)
+    {
+        static char empty[1] = { 0 };
+        static RawFileAsset blank = {};
+        blank.name = "(missing cfg)";
+        blank.length = 0;
+        blank.padding = 0;
+        blank.buffer = empty;
+        T7Log_Write("[Cmd] exec of a missing file \"%s\" does nothing, as on PC", RangeReadable(name, 4) ? (const char*)name : "?");
+        return (uint64_t)&blank;
+    }
+
+    if (lua && LuaMissing(result))
+    {
+        if (const RawFileAsset* const extra = LuiExtraFor(asset))
+        {
+            T7Log_LuiBuffer(asset, (uintptr_t)extra);
+            return (uint64_t)extra;
+        }
+    }
+
     if (lua)
         T7Log_LuiBuffer(asset, (uintptr_t)result);
 
@@ -1253,6 +2851,82 @@ static uint64_t FindXAsset(uint64_t type, uint64_t name, uint64_t a3, uint64_t a
 }
 
 static void AddPcUtil();
+
+static void CheckMenus()
+{
+    if (!UiUp() || !UiTryLock())
+        return;
+
+    bool broken = false;
+
+    if (UiUp())
+    {
+        SetDvar("bo3customs_menus", "0");
+        RunLua(k_menusProbeLua, "=bo3customs_menus_probe");
+
+        const uintptr_t dvar = FindDvar("bo3customs_menus");
+        const char* const text = dvar ? DvarText(dvar) : nullptr;
+        broken = text && atoi(text) == 2;
+    }
+
+    UiUnlock();
+
+    if (broken)
+        T7Maps_MenusBroken();
+}
+
+static uint64_t Require_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
+                          double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
+{
+    const uintptr_t L = (uintptr_t)a1;
+
+    if (L && L == *(const uintptr_t*)(g_base + kLuaState) && T7Maps_UsingMods() && UiTryLock())
+    {
+        RunLuaOn(L, T7Maps_ModFilesLua(), "=bo3customs_mod_files");
+        RunLuaOn(L, k_lobbyParityLua, "=bo3customs_lobby");
+        RunLuaOn(L, k_pcParityLua, "=bo3customs_parity_early");
+        UiUnlock();
+    }
+
+    if (L && L == *(const uintptr_t*)(g_base + kLuaState) && T7Maps_UsingMods() && UiTryLock())
+    {
+        const char* const module = (const char*)a2;
+        const bool dll = T7Maps_DllModLoaded();
+
+        if (dll && module && RangeReadable(a2, 11) && strcmp(module, "ui.LUI.LUI") == 0)
+            T7Log_Write("[Lua] a new UI state starts; stand-ins for the T7Overcharged DLL go in first");
+
+        char ugc[96];
+        char save[192];
+        T7Maps_FirstModUgc(ugc, sizeof(ugc));
+        T7Maps_ModSave(save, sizeof(save));
+
+        char lua[512];
+        size_t used = (size_t)snprintf(lua, sizeof(lua), "rawset(_G, 'BO3CustomsDllUgc', ");
+        AppendQuoted(lua, sizeof(lua), &used, ugc);
+        used += (size_t)snprintf(lua + used, sizeof(lua) - used, ")\nrawset(_G, 'BO3CustomsDllSave', ");
+        AppendQuoted(lua, sizeof(lua), &used, save);
+        snprintf(lua + used, sizeof(lua) - used, ")\nrawset(_G, 'BO3CustomsDllMod', %s)\n", dll ? "true" : "false");
+
+        RunLuaOn(L, lua, "=bo3customs_dll_ugc");
+        RunLuaOn(L, k_dllStandInLua, "=bo3customs_dll");
+        UiUnlock();
+    }
+
+    return ((Passthrough_t)g_requireOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
+}
+
+static void HookRequire()
+{
+    static const uint8_t k_require[] = { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
+                                         0x53, 0x48, 0x83, 0xEC, 0x18 };
+
+    if (!g_base || !RangeReadable(g_base + kLuaRequire, sizeof(k_require)) ||
+        memcmp((const void*)(g_base + kLuaRequire), k_require, sizeof(k_require)) != 0)
+        return;
+
+    Detour_Attach(&g_requireDetour, (uint64_t)(g_base + kLuaRequire), (void*)Require_h, &g_requireOriginal);
+}
 
 static uint64_t AddMenu_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
                           double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
@@ -1266,6 +2940,7 @@ static uint64_t AddMenu_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, ui
         AddPcUtil();
         InjectScripts();
         g_forceInject = false;
+        CheckMenus();
     }
 
     return ((Passthrough_t)g_addMenuOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
@@ -1313,6 +2988,8 @@ static void AddPcUtil()
         RunLua(k_pcUtilityLua, "=bo3customs_pcutility");
         RunLua(k_pcUtilLua, "=bo3customs_pcutil");
         RunLua(k_globalAliasLua, "=bo3customs_alias");
+        RunLua(k_pcParityLua, "=bo3customs_parity");
+        RunLua(k_lobbyMapsLua, "=bo3customs_lobbymaps");
         RunLua(k_zombieSeedLua, "=bo3customs_seed");
         g_pcUtilState = L;
 
@@ -1420,8 +3097,10 @@ void T7Lua_Install(uintptr_t base)
     installed = true;
     g_base = base;
 
+
     HookFindXAsset();
     HookAddMenu();
+    HookRequire();
     PatchFrameLimit();
     PatchSplitScreen();
     HookView();
@@ -1447,7 +3126,16 @@ void T7Lua_Tick()
     PollGraphics();
 
     if (InMenus())
+    {
         InjectScripts();
+    }
+    else if (UiTryLock())
+    {
+        if (UiUp())
+            RunLua(k_lobbyTickLua, "=bo3customs_lobbytick");
+
+        UiUnlock();
+    }
 }
 
 bool T7Lua_MouseReady()

@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <UseWPF>true</UseWPF>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <AssemblyName>PS4 .FF Porter</AssemblyName>
+    <RootNamespace>FFPorter.Probe</RootNamespace>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+    <ProbeLabel Condition="'$(ProbeLabel)' == ''">one</ProbeLabel>
+  </PropertyGroup>
+  <ItemGroup>
+    <AssemblyMetadata Include="Built" Value="$([System.DateTime]::UtcNow.ToString('o'))" />
+    <AssemblyMetadata Include="Label" Value="$(ProbeLabel)" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\FFPorter.Desktop.Shared\FFPorter.Desktop.Shared.csproj" />
+  </ItemGroup>
+</Project>

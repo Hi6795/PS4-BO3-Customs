@@ -1,5 +1,7 @@
 #include "headers.hpp"
 
+#include <atomic>
+
 namespace
 {
 constexpr uintptr_t kTitleProbe = 0x1312346;
@@ -123,16 +125,38 @@ static void* start_thread(void*)
     return nullptr;
 }
 
-extern "C"
+static std::atomic<bool> g_started{false};
+
+static int Start()
 {
-int module_start(size_t argc, const void* args)
-{
+    if (g_started.exchange(true))
+        return 0;
+
     ScePthread thread;
 
     scePthreadCreate(&thread, nullptr, start_thread, nullptr, "BO3-Customs Init");
     scePthreadJoin(thread, nullptr);
 
     return 0;
+}
+
+extern "C"
+{
+__declspec(dllexport) const char* g_pluginName = "BO3-Customs";
+
+__declspec(dllexport) int32_t plugin_load(int32_t argc, const char* argv[])
+{
+    return Start();
+}
+
+__declspec(dllexport) int32_t plugin_unload(int32_t argc, const char* argv[])
+{
+    return 0;
+}
+
+int module_start(size_t argc, const void* args)
+{
+    return Start();
 }
 
 int module_stop(size_t argc, const void* args)

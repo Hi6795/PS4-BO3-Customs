@@ -4,6 +4,7 @@
 #include "t7_config.hpp"
 
 #include <mouse.h>
+#include <pad.h>
 #include <libime.h>
 #include <libsysmodule.h>
 #include <user_service.h>
@@ -27,6 +28,8 @@ constexpr uintptr_t kLocalize        = 0xF8E430;
 constexpr uintptr_t kCbufAddText     = 0xEE44C0;
 constexpr uintptr_t kDvarInt         = 0xFB72D0;
 constexpr uintptr_t kLanguageDvar    = 0xCC3DEF0;
+constexpr uintptr_t kLanguageTable   = 0x15F7CA0;
+constexpr int32_t   kLanguageCount   = 23;
 constexpr uintptr_t kDvarFind        = 0xFB6ED0;
 constexpr uintptr_t kDvarString      = 0xFB69C0;
 constexpr uintptr_t kDvarSetByName   = 0xFBC5A0;
@@ -164,6 +167,12 @@ constexpr float kCursorPerCountX    = 1.0f / 2560.0f;
 constexpr float kCursorPerCountY    = 1.0f / 1440.0f;
 constexpr float kCursorHidden       = -1.0f;
 constexpr float kStickActive        = 0.25f;
+constexpr float kTouchWidth         = 1920.0f;
+constexpr float kTouchHeight        = 942.0f;
+constexpr float kTouchSpeed         = 1.25f;
+constexpr int32_t kTouchStart       = 60;
+constexpr int32_t kKeyPadBack       = 15;
+constexpr uint64_t kPadCursorIdleUs = 5000000;
 constexpr float kTriggerActive      = 0.1f;
 constexpr float kAccelRange         = 50.0f;
 constexpr float kFilterRange        = 20.0f;
@@ -452,6 +461,7 @@ static uint32_t  g_frames = 0;
 static Detour g_imeDetour{};
 static void*  g_imeOriginal = nullptr;
 static Detour g_frameDetour{};
+static Detour g_keyDetour{};
 static void*  g_frameOriginal = nullptr;
 static Detour g_cmdDetour{};
 static void*  g_cmdOriginal = nullptr;
@@ -486,6 +496,26 @@ static float    g_cursorY = 0.5f;
 static bool     g_cursorShown = false;
 static uint64_t g_cursorLua = 0;
 static bool     g_mouseUsed = false;
+static bool     g_padCursor = false;
+static bool     g_padClick = false;
+static bool     g_padChecked = false;
+static bool     g_padReady = false;
+static bool     g_touching = false;
+static bool     g_touchButton = false;
+static bool     g_backSwallowed = false;
+static int32_t  g_padHandle = -1;
+static int32_t  g_touchId = -1;
+static int32_t  g_touchX = 0;
+static int32_t  g_touchY = 0;
+static int32_t  g_touchTravel = 0;
+static uint32_t g_padRetryAt = 0;
+static uint64_t g_padCursorUsed = 0;
+static volatile bool g_pauseMenu = false;
+static int32_t  g_padGate = -1;
+static int32_t  g_padGateLogs = 0;
+static int32_t  g_padError = 0;
+static bool     g_touchSeen = false;
+static void*    g_keyOriginal = nullptr;
 static bool     g_luiReady = false;
 static bool     g_cbufReady = false;
 static bool     g_languageReady = false;
@@ -1315,6 +1345,8 @@ static bool PadActive(int32_t controller)
            *(const float*)(pad + kPadRightTrigger) > kTriggerActive;
 }
 
+static void EndPadCursor();
+
 static void SetLastInput(int32_t lc, int32_t device)
 {
     if (!g_inputReady || lc < 0 || lc > 3)
@@ -1323,8 +1355,11 @@ static void SetLastInput(int32_t lc, int32_t device)
     const int32_t controller = ControllerOf(lc);
     const bool pad = device == kInputPad || device == kInputRemotePad;
 
-    if (pad && !PadActive(controller))
+    if (pad && (!PadActive(controller) || (g_padCursor && (g_touching || g_touchButton))))
         return;
+
+    if (pad)
+        EndPadCursor();
 
     int32_t* const last = (int32_t*)(MapEntry(lc) + kMapLastInput);
     const int32_t old = *last;
@@ -1847,6 +1882,268 @@ static void MoveCursor(int32_t dx, int32_t dy, bool menu, bool kbm)
     g_cursorLua = L;
 }
 
+static bool ImportBound(const void* function)
+{
+    SceKernelVirtualQueryInfo info;
+
+    if (sceKernelVirtualQuery((void*)&ImportBound, 0, &info, sizeof(info)) < 0)
+        return true;
+
+    const uintptr_t start = (uintptr_t)info.start;
+    const uintptr_t end = (uintptr_t)info.end;
+    const uintptr_t stub = (uintptr_t)function;
+
+    if (stub < 0x10000)
+        return false;
+
+    if (stub < start || stub + 6 > end || ((const uint8_t*)stub)[0] != 0xFF || ((const uint8_t*)stub)[1] != 0x25)
+        return true;
+
+    const uintptr_t slot = stub + 6 + (intptr_t)*(const int32_t*)(stub + 2);
+    const uintptr_t target = *(const uintptr_t*)slot;
+    return target >= 0x10000 && (target < start || target >= end);
+}
+
+static void EndPadCursor()
+{
+    if (!g_padCursor)
+        return;
+
+    g_padCursor = false;
+
+    if (g_padClick)
+    {
+        g_padClick = false;
+        OnKey(kKeyMouse1, false, false);
+    }
+
+    HideCursor();
+    Log("touchpad pointer off");
+}
+
+static bool DvarOn(const char* name)
+{
+    const char* const text = DvarText(name);
+    return text && atoi(text) != 0;
+}
+
+static bool PlayingUnpaused()
+{
+    static bool checked = false;
+
+    if (!checked)
+    {
+        checked = true;
+        Log(FindDvar("cl_ingame") && FindDvar("cl_paused") ? "touchpad pointer stays off in a match unless it is paused"
+                                                            : "cl_ingame or cl_paused is missing; the touchpad pointer also works in a match");
+    }
+
+    if (!T7Maps_InLevel() || g_pauseMenu)
+        return false;
+
+    return DvarOn("cl_ingame") && !DvarOn("cl_paused");
+}
+
+static void LogPadGate(int32_t gate)
+{
+    if (gate == g_padGate)
+        return;
+
+    g_padGate = gate;
+
+    if (g_padGateLogs >= 40)
+        return;
+
+    ++g_padGateLogs;
+    static const char* const reasons[] = { "allowed here", "off: no menu takes input", "off: the menu mouse script is not loaded",
+                                           "off: a match is running and is not paused" };
+    Log("touchpad pointer %s (in a level %d, cl_ingame %d, cl_paused %d, pause menu %d)", reasons[gate], T7Maps_InLevel() ? 1 : 0,
+        DvarOn("cl_ingame") ? 1 : 0, DvarOn("cl_paused") ? 1 : 0, g_pauseMenu ? 1 : 0);
+}
+
+static void PadCursor(int32_t lc)
+{
+    if (!g_padChecked)
+    {
+        g_padChecked = true;
+        g_padReady = ImportBound((const void*)&scePadReadState) && ImportBound((const void*)&scePadGetHandle);
+        Log(g_padReady ? "touchpad pointer ready (swipe to point, click to click)"
+                       : "the controller library is not bound - no touchpad pointer");
+    }
+
+    if (!g_padReady)
+        return;
+
+    const int32_t gate = !InMenu(lc) ? 1 : !T7Lua_MouseReady() ? 2 : PlayingUnpaused() ? 3 : 0;
+    LogPadGate(gate);
+
+    if (gate != 0)
+    {
+        EndPadCursor();
+        g_touching = false;
+        g_touchButton = false;
+        g_touchId = -1;
+        return;
+    }
+
+    if (g_padHandle < 0)
+    {
+        if (g_frames < g_padRetryAt)
+            return;
+
+        g_padRetryAt = g_frames + kRetryFrames;
+
+        const SceUserServiceUserId user = MouseUser();
+
+        if (user == SCE_USER_SERVICE_USER_ID_INVALID)
+            return;
+
+        g_padHandle = scePadGetHandle(user, SCE_PAD_PORT_TYPE_STANDARD, 0);
+
+        if (g_padHandle < 0)
+        {
+            if (g_padError != g_padHandle)
+            {
+                g_padError = g_padHandle;
+                Log("touchpad: the controller handle is not available (%08X)", (uint32_t)g_padHandle);
+            }
+
+            return;
+        }
+    }
+
+    ScePadData data;
+    memset(&data, 0, sizeof(data));
+
+    const int32_t read = scePadReadState(g_padHandle, &data);
+
+    if (read != 0 || !data.connected)
+    {
+        if (g_padError != (read ? read : 1))
+        {
+            g_padError = read ? read : 1;
+            Log("touchpad: reading the controller failed (%08X, connected %d)", (uint32_t)read, data.connected ? 1 : 0);
+        }
+
+        g_padHandle = -1;
+        g_touching = false;
+        g_touchButton = false;
+        g_touchId = -1;
+        return;
+    }
+
+    const uint64_t now = sceKernelGetProcessTime();
+    const bool touching = data.touchData.touchNum > 0;
+    const bool button = (data.buttons & SCE_PAD_BUTTON_TOUCH_PAD) != 0;
+    float moveX = 0.0f;
+    float moveY = 0.0f;
+
+    g_touching = touching;
+    g_touchButton = button;
+
+    if (touching && !g_touchSeen)
+    {
+        g_touchSeen = true;
+        Log("touchpad: first touch seen");
+    }
+
+    if (touching)
+    {
+        const ScePadTouch& touch = data.touchData.touch[0];
+
+        if (g_touchId != (int32_t)touch.id)
+        {
+            g_touchId = (int32_t)touch.id;
+            g_touchTravel = 0;
+        }
+        else
+        {
+            const int32_t dx = (int32_t)touch.x - g_touchX;
+            const int32_t dy = (int32_t)touch.y - g_touchY;
+
+            g_touchTravel += (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+
+            if (g_padCursor)
+            {
+                moveX = (float)dx / kTouchWidth * kTouchSpeed;
+                moveY = (float)dy / kTouchHeight * kTouchSpeed;
+            }
+        }
+
+        g_touchX = (int32_t)touch.x;
+        g_touchY = (int32_t)touch.y;
+
+        if (!g_padCursor && g_touchTravel >= kTouchStart)
+        {
+            SetLastInput(lc, kInputMouseButton);
+            g_padCursor = true;
+            Log("touchpad pointer on");
+        }
+
+        if (g_padCursor)
+            g_padCursorUsed = now;
+    }
+    else
+    {
+        g_touchId = -1;
+    }
+
+    if (!g_padCursor)
+        return;
+
+    if (!touching && !button && now - g_padCursorUsed > kPadCursorIdleUs)
+    {
+        EndPadCursor();
+        return;
+    }
+
+    if (button != g_padClick)
+    {
+        g_padClick = button;
+        g_padCursorUsed = now;
+        OnKey(kKeyMouse1, button, false);
+    }
+
+    const uint64_t L = *(const uint64_t*)(g_base + kLuaState);
+
+    if (moveX == 0.0f && moveY == 0.0f && g_cursorShown && L == g_cursorLua)
+        return;
+
+    g_cursorX = Clamp01(g_cursorX + moveX);
+    g_cursorY = Clamp01(g_cursorY + moveY);
+
+    const uintptr_t cursor = g_base + kInputLock + kController * kInputLockSize;
+    *(float*)(cursor + kCursorX) = g_cursorX;
+    *(float*)(cursor + kCursorY) = g_cursorY;
+
+    SendMouseMove(g_cursorX, g_cursorY);
+    g_cursorShown = true;
+    g_cursorLua = L;
+}
+
+static uint64_t KeyEvent(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
+                         double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
+{
+    if ((int32_t)a2 == kKeyPadBack)
+    {
+        const bool down = (int32_t)a3 != 0;
+
+        if (down && (g_padCursor || g_backSwallowed))
+        {
+            g_backSwallowed = true;
+            return 0;
+        }
+
+        if (!down && g_backSwallowed)
+        {
+            g_backSwallowed = false;
+            return 0;
+        }
+    }
+
+    return ((Passthrough_t)g_keyOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
+}
+
 static void PollMouse(int32_t lc)
 {
     if (!g_mouseReady)
@@ -1955,7 +2252,7 @@ static void PollMouse(int32_t lc)
         g_lookY += g_smoothY * boost;
     }
 
-    MoveCursor(dx, dy, menu, KbmLast(lc));
+    MoveCursor(dx, dy, menu, KbmLast(lc) || g_padCursor);
 }
 
 static float ZoomScale(int32_t lc)
@@ -2063,6 +2360,7 @@ static uint64_t InputFrame(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, u
         SyncEngineBinds();
     }
 
+    PadCursor(lc);
     PollMouse(lc);
     return result;
 }
@@ -2132,6 +2430,43 @@ static void InstallInput(uintptr_t base)
 }
 }
 
+void T7Kbm_SetPauseMenu(bool open)
+{
+    T7Kbm::g_pauseMenu = open;
+}
+
+bool T7Kbm_LanguagePrefix(char* out, size_t size)
+{
+    using namespace T7Kbm;
+
+    if (!g_base || !g_languageReady || !out || size < 3)
+        return false;
+
+    const uintptr_t dvar = *(const uintptr_t*)(g_base + kLanguageDvar);
+
+    if (!dvar)
+        return false;
+
+    const int32_t index = ((int32_t (*)(uintptr_t))(g_base + kDvarInt))(dvar);
+
+    if (index < 0 || index >= kLanguageCount)
+        return false;
+
+    const uintptr_t entry = g_base + kLanguageTable + (uintptr_t)index * 32 + 8;
+
+    if (!RangeReadable(entry, 8))
+        return false;
+
+    const char* const prefix = *(const char* const*)entry;
+
+    if (!prefix || !RangeReadable((uintptr_t)prefix, 3) || prefix[0] < 'a' || prefix[0] > 'z' || prefix[1] < 'a' ||
+        prefix[1] > 'z' || prefix[2] != 0)
+        return false;
+
+    snprintf(out, size, "%s", prefix);
+    return true;
+}
+
 void T7Kbm_Install(uintptr_t base)
 {
     using namespace T7Kbm;
@@ -2173,5 +2508,11 @@ void T7Kbm_Install(uintptr_t base)
 
     Detour_Attach(&g_imeDetour, (uint64_t)(base + kImeHandler), (void*)ImeHandler, &g_imeOriginal);
     Detour_Attach(&g_frameDetour, (uint64_t)(base + kInputFrame), (void*)InputFrame, &g_frameOriginal);
+
+    static const uint8_t k_keyEvent[] = { 0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
+                                          0x53, 0x48, 0x83, 0xEC, 0x38, 0x41, 0x89, 0xF6, 0x41, 0x89, 0xFB };
+
+    if (Matches(base + kKeyEvent, k_keyEvent, sizeof(k_keyEvent)))
+        Detour_Attach(&g_keyDetour, (uint64_t)(base + kKeyEvent), (void*)KeyEvent, &g_keyOriginal);
     Detour_Attach(&g_cmdDetour, (uint64_t)(base + kCreateCmd), (void*)CreateCmd, &g_cmdOriginal);
 }

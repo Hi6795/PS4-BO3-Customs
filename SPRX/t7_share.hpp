@@ -5,7 +5,7 @@
 
 constexpr size_t kT7ShareName = 56;
 constexpr size_t kT7SharePath = 224;
-constexpr int    kT7ShareMods = 6;
+constexpr int    kT7ShareMods = 24;
 
 struct T7ShareStatus
 {
@@ -13,6 +13,7 @@ struct T7ShareStatus
     char  name[128];
     char  detail[160];
     char  file[192];
+    char  speeds[128];
     float fraction;
     bool  failed;
 };

@@ -93,7 +93,7 @@
       <CppLanguageStd>Cpp20</CppLanguageStd>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>libkernel_stub_weak.a;libkernel_gen_stub_weak.a;libkernel_unity_stub_weak.a;libSceSysmodule_stub_weak.a;libSceMouse_stub_weak.a;libSceUserService_stub_weak.a;libSceNet_stub_weak.a;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libkernel_stub_weak.a;libkernel_gen_stub_weak.a;libkernel_unity_stub_weak.a;libSceSysmodule_stub_weak.a;libSceMouse_stub_weak.a;libScePad_stub_weak.a;libSceUserService_stub_weak.a;libSceSystemService_stub_weak.a;libSceNet_stub_weak.a;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <InfoStripping>StripSymsAndDebug</InfoStripping>
     </Link>
@@ -113,7 +113,7 @@ del "$(ProjectDir)$(TargetName).prx.down"</Command>
       <CppLanguageStd>Cpp20</CppLanguageStd>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>libkernel_stub_weak.a;libkernel_gen_stub_weak.a;libSceSysmodule_stub_weak.a;libSceMouse_stub_weak.a;libSceUserService_stub_weak.a;libSceNet_stub_weak.a;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>libkernel_stub_weak.a;libkernel_gen_stub_weak.a;libSceSysmodule_stub_weak.a;libSceMouse_stub_weak.a;libScePad_stub_weak.a;libSceUserService_stub_weak.a;libSceSystemService_stub_weak.a;libSceNet_stub_weak.a;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <InfoStripping>StripSymsAndDebug</InfoStripping>
     </Link>

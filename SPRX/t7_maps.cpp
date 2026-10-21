@@ -132,6 +132,7 @@ constexpr uint64_t  kStallUs           = 4000000;
 constexpr uint64_t  kStallGapUs        = 5000000;
 constexpr uint32_t  kStallRounds       = 3;
 constexpr uint32_t  kStallArmFrames    = 120;
+constexpr uint64_t  kLoadStallUs       = 20000000;
 constexpr uint64_t  kStallAnswerUs     = 300000;
 constexpr int       kStallRawWords     = 64;
 constexpr int       kStallStackWords   = 8192;
@@ -172,6 +173,7 @@ constexpr int    kMaxFiles      = 1536;
 constexpr int    kMaxZoneCall   = 32;
 constexpr int    kMaxListed     = 96;
 constexpr size_t kNameMax       = 56;
+constexpr size_t kQueryMax      = 200;
 constexpr size_t kListedNameMax = 96;
 
 static const char k_levelCommon[] = "zm_levelcommon";
@@ -189,18 +191,22 @@ constexpr uint32_t  kFirstPoolEnd    = 0x200u;
 constexpr int32_t   kModZoneFlags    = (int32_t)(kModMarker | (uint32_t)kModeCommonFlags);
 constexpr int32_t   kLoadWithoutFree = 0x40000000;
 constexpr uint64_t  kModPriority     = 1150;
+constexpr uint64_t  kModScriptPriority = 1210;
 constexpr int       kModZoneKinds    = 4;
 constexpr int       kMaxMods         = 48;
-constexpr int       kMaxStack        = 6;
+constexpr int       kMaxStack        = 24;
 constexpr int       kMaxStackFiles   = 160;
 constexpr uint32_t  kModRankShift    = 29;
 constexpr uint32_t  kModRankMax      = 3;
 constexpr int32_t   kKeyValuePairs   = 55;
 constexpr int32_t   kBgCache         = 85;
 constexpr int       kExpandedZones   = 32;
+constexpr int       kZoneRecordMax   = 64;
+constexpr int       kLevelZoneRoom   = 12;
+constexpr uint32_t  kXpakNames       = 128;
 constexpr int       kMaxModListed    = 256;
-constexpr int       kMaxScriptClaims = 512;
-constexpr int       kMaxInterned     = 384;
+constexpr int       kMaxScriptClaims = 2048;
+constexpr int       kMaxInterned     = 1536;
 constexpr size_t    kInternedMax     = 128;
 
 static const char* const k_modZones[kModZoneKinds]   = { "core_mod", "zm_mod", "mp_mod", "cp_mod" };
@@ -250,6 +256,8 @@ struct Mod
     char title[96];
     char ugc[40];
     char internal[kNameMax];
+    char preview[288];
+    char* description;
     bool zones[kModZoneKinds];
 };
 
@@ -315,10 +323,17 @@ static uint64_t                g_reloadSince = 0;
 static int                     g_waitFrom = 0;
 static char                    g_uiMods[kMaxMods][kNameMax];
 static int                     g_uiModCount = 0;
-static char                    g_waitZones[32][kNameMax];
+static char                    g_dllMods[kMaxMods][kNameMax];
+static int                     g_dllModCount = 0;
+constexpr int                  kMaxModUiFiles = 1024;
+static char                    g_modUiFiles[kMaxModUiFiles][96];
+static char                    g_modUiOwners[kMaxModUiFiles][kNameMax];
+static int                     g_modUiFileCount = 0;
+static char                    g_modNotice[224];
+static char                    g_waitZones[64][kNameMax];
 static int                     g_waitZoneCount = 0;
 static std::atomic<uint64_t>   g_loadingThread{0};
-static char                    g_xpakNames[32][kNameMax + 8];
+static char                    g_xpakNames[kXpakNames][kNameMax + 8];
 static std::atomic<uint32_t>   g_xpakNameAt{0};
 static std::atomic<bool> g_modsLuaDirty{true};
 
@@ -406,6 +421,7 @@ static Detour g_gpuFxQueueDetour{};
 static void*  g_gpuFxQueueOriginal = nullptr;
 
 static std::atomic<bool>     g_usermapLevel{false};
+static char                  g_usermapName[kNameMax] = {};
 static std::atomic<uint64_t> g_textureWaitStart{0};
 static std::atomic<bool>     g_texturesForced{false};
 static std::atomic<uint64_t> g_gateLogged{0};
@@ -424,6 +440,9 @@ static std::atomic<uint32_t> g_clientFrames{0};
 static std::atomic<uint64_t> g_levelStart{0};
 static std::atomic<uint64_t> g_lastFrameAt{0};
 static std::atomic<uint32_t> g_levelFrames{0};
+static std::atomic<uint32_t> g_linkCount{0};
+static std::atomic<uint32_t> g_comFrames{0};
+static std::atomic<bool>     g_poolsWanted{false};
 static int32_t               g_lastFrozen[4] = { -1, -1, -1, -1 };
 
 struct StallSample
@@ -576,6 +595,130 @@ static const PenaltySite k_placeholderPenalties[] =
 constexpr int32_t kPlaceholderPenalty    = -1000;
 constexpr int32_t kPlaceholderPenaltyLow = -2000;
 
+constexpr uintptr_t kAssetPools = 0x37C83F0;
+
+struct AssetPool
+{
+    uintptr_t base;
+    uint32_t  size;
+    uint32_t  limit;
+    uint8_t   single;
+    uint8_t   padding[3];
+    uint32_t  used;
+    uintptr_t free;
+};
+
+static_assert(sizeof(AssetPool) == 32, "the game's pool records are 32 bytes");
+
+struct PoolGrowth
+{
+    int32_t     type;
+    const char* name;
+    uint32_t    size;
+    uint32_t    limit;
+    uint32_t    grown;
+    bool        capped;
+};
+
+static PoolGrowth g_poolGrowth[] =
+{
+    { 0, "physpreset", 120, 275, 0 },
+    { 1, "physconstraints", 1680, 128, 0 },
+    { 2, "destructibledef", 48, 128, 0 },
+    { 3, "xanim", 248, 25000, 0 },
+    { 6, "material", 664, 19712, 0 },
+    { 7, "computeshaderset", 24, 256, 0 },
+    { 8, "techset", 112, 1024, 0 },
+    { 10, "sound", 139440, 32, 0 },
+    { 11, "sound_patch", 24, 16, 0 },
+    { 12, "col_map", 720, 2, 0 },
+    { 13, "com_map", 136, 2, 0 },
+    { 14, "game_map", 80, 2, 0 },
+    { 15, "map_ents", 72, 2, 0 },
+    { 17, "lightdef", 40, 32, 0 },
+    { 18, "lensflaredef", 536, 64, 0 },
+    { 20, "font", 56, 16, 0 },
+    { 21, "fonticon", 32, 16, 0 },
+    { 22, "localize", 16, 23552, 0 },
+    { 23, "weapon", 768, 1536, 0 },
+    { 27, "cgmediatable", 1056, 5, 0 },
+    { 28, "playersoundstable", 1096, 16, 0 },
+    { 29, "playerfxtable", 152, 16, 0 },
+    { 30, "sharedweaponsounds", 240, 64, 0 },
+    { 31, "attachment", 544, 128, 0 },
+    { 32, "attachmentunique", 2112, 2148, 0 },
+    { 33, "weaponcamo", 24, 512, 0 },
+    { 34, "customizationtable", 40, 8, 0 },
+    { 35, "customizationtable_feimages", 24, 8, 0 },
+    { 36, "customizationtablecolor", 48, 1024, 0 },
+    { 37, "snddriverglobals", 120, 1, 0 },
+    { 38, "fx", 144, 1875, 0 },
+    { 39, "tagfx", 24, 64, 0 },
+    { 41, "impactsfxtable", 24, 256, 0 },
+    { 42, "impactsoundstable", 32, 64, 0 },
+    { 43, "player_character", 144, 8, 0 },
+    { 44, "aitype", 2352, 96, 0 },
+    { 45, "character", 624, 150, 0 },
+    { 46, "xmodelalias", 408, 48, 0 },
+    { 47, "rawfile", 24, 4300, 0 },
+    { 48, "stringtable", 32, 200, 0 },
+    { 49, "structuredtable", 56, 96, 0 },
+    { 50, "leaderboarddef", 48, 256, 0 },
+    { 51, "ddl", 96, 64, 0 },
+    { 52, "glasses", 88, 2, 0 },
+    { 53, "texturelist", 72, 8, 0 },
+    { 54, "scriptparsetree", 24, 1024, 0 },
+    { 55, "keyvaluepairs", 24, 64, 0 },
+    { 56, "vehicle", 2728, 64, 0 },
+    { 57, "addon_map_ents", 104, 1, 0 },
+    { 58, "tracer", 152, 100, 0 },
+    { 59, "slug", 24, 5, 0 },
+    { 60, "surfacefxtable", 328, 64, 0 },
+    { 61, "surfacesounddef", 168, 256, 0 },
+    { 62, "footsteptable", 64, 32, 0 },
+    { 63, "entityfximpacts", 536, 256, 0 },
+    { 64, "entitysoundimpacts", 272, 256, 0 },
+    { 65, "zbarrier", 768, 16, 0 },
+    { 66, "vehiclefxdef", 984, 32, 0 },
+    { 67, "vehiclesounddef", 4096, 32, 0 },
+    { 69, "scriptbundle", 48, 1024, 0 },
+    { 70, "scriptbundlelist", 32, 64, 0 },
+    { 71, "rumble", 64, 256, 0 },
+    { 72, "bulletpenetration", 488, 1, 0 },
+    { 73, "locdmgtable", 96, 1, 0 },
+    { 74, "aimtable", 816, 12, 0 },
+    { 75, "animselectortable", 24, 64, 0 },
+    { 76, "animmappingtable", 24, 64, 0 },
+    { 77, "animstatemachine", 56, 64, 0 },
+    { 78, "behaviortree", 40, 64, 0 },
+    { 79, "behaviorstatemachine", 32, 128, 0 },
+    { 80, "ttf", 131104, 48, 0 },
+    { 82, "lightdescription", 576, 500, 0 },
+    { 83, "shellshock", 176, 64, 0 },
+    { 84, "xcam", 168, 512, 0 },
+    { 85, "bgcache", 24, 32, 0 },
+    { 86, "texturecombo", 128, 16, 0 },
+    { 87, "flametable", 536, 16, 0 },
+    { 88, "bitfield", 32, 52, 0 },
+    { 89, "attachmentcosmeticvariant", 24, 640, 0 },
+    { 90, "maptable", 40, 25, 0 },
+    { 91, "maptableloadingimages", 24, 25, 0 },
+    { 92, "medal", 48, 768, 0 },
+    { 93, "medaltable", 24, 32, 0 },
+    { 94, "objective", 112, 256, 0 },
+    { 95, "objectivelist", 24, 64, 0 },
+    { 97, "navmesh", 104, 2, 0 },
+    { 98, "navvolume", 72, 2, 0 },
+    { 99, "binaryhtml", 24, 2048, 0 },
+    { 100, "laser", 112, 50, 0 },
+    { 101, "beam", 688, 50, 0 },
+    { 102, "streamerhint", 40, 50, 0 },
+};
+
+constexpr uint32_t kPoolStepMin  = 8;
+constexpr uint32_t kPoolStepMax  = 4096;
+constexpr uint32_t kPoolExtraMin = 64;
+
 static bool EqualsNoCase(const char* a, const char* b)
 {
     for (;; ++a, ++b)
@@ -596,6 +739,29 @@ static bool EndsWith(const char* text, const char* tail)
     const size_t n = strlen(text);
     const size_t m = strlen(tail);
     return n >= m && strcmp(text + n - m, tail) == 0;
+}
+
+static bool ContainsNoCase(const char* text, const char* part)
+{
+    for (; *text; ++text)
+    {
+        const char* a = text;
+        const char* b = part;
+
+        for (; *b; ++a, ++b)
+        {
+            const char x = (*a >= 'A' && *a <= 'Z') ? (char)(*a + 32) : *a;
+            const char y = (*b >= 'A' && *b <= 'Z') ? (char)(*b + 32) : *b;
+
+            if (x != y)
+                break;
+        }
+
+        if (!*b)
+            return true;
+    }
+
+    return false;
 }
 
 static bool IsToken(const char* name)
@@ -938,13 +1104,31 @@ static int FindMod(const char* name)
     return -1;
 }
 
+static int StackPrefix(const char* at, int* index)
+{
+    if (at[0] != 'm' || at[1] < '1' || at[1] > '9')
+        return 0;
+
+    int number = 0;
+    int n = 1;
+
+    while (n < 3 && at[n] >= '0' && at[n] <= '9')
+        number = number * 10 + (at[n++] - '0');
+
+    if (at[n] != '_' || number < 2 || number > kMaxStack)
+        return 0;
+
+    *index = number - 1;
+    return n + 1;
+}
+
 static bool IsModZoneName(const char* name)
 {
     if (!name)
         return false;
 
-    if (name[0] == 'm' && name[1] >= '2' && name[1] <= '9' && name[2] == '_')
-        name += 3;
+    int stacked = 0;
+    name += StackPrefix(name, &stacked);
 
     for (int k = 0; k < kModZoneKinds; ++k)
     {
@@ -963,8 +1147,7 @@ static bool StackName(const char* name, int* index, char* inner, size_t size)
     const char* at = name;
     char language[4] = "";
 
-    if (at[0] >= 'a' && at[0] <= 'z' && at[1] >= 'a' && at[1] <= 'z' && at[2] == '_' && at[3] == 'm' &&
-        at[4] >= '2' && at[4] <= '9' && at[5] == '_')
+    if (at[0] >= 'a' && at[0] <= 'z' && at[1] >= 'a' && at[1] <= 'z' && at[2] == '_' && StackPrefix(at + 3, index) > 0)
     {
         language[0] = at[0];
         language[1] = at[1];
@@ -973,11 +1156,12 @@ static bool StackName(const char* name, int* index, char* inner, size_t size)
         at += 3;
     }
 
-    if (at[0] != 'm' || at[1] < '2' || at[1] > '9' || at[2] != '_' || !at[3])
+    const int skip = StackPrefix(at, index);
+
+    if (skip == 0 || !at[skip])
         return false;
 
-    *index = at[1] - '1';
-    snprintf(inner, size, "%s%s", language, at + 3);
+    snprintf(inner, size, "%s%s", language, at + skip);
     return true;
 }
 
@@ -1249,7 +1433,7 @@ static uint64_t IsMapValid_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
     return ((Hook_t)g_validOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
 }
 
-static const char* LuaStringArgument(uint64_t state)
+static const char* LuaStringArgument(uint64_t state, size_t limit = kNameMax)
 {
     const uint64_t at = *(uint64_t*)(state + 80);
 
@@ -1257,7 +1441,7 @@ static const char* LuaStringArgument(uint64_t state)
         return nullptr;
 
     const uint64_t string = *(uint64_t*)(at + 8);
-    return (*(uint64_t*)(string + 8) & 0x3FFFFFFFFFFFFFFFull) < kNameMax ? (const char*)(string + 20) : nullptr;
+    return (*(uint64_t*)(string + 8) & 0x3FFFFFFFFFFFFFFFull) < limit ? (const char*)(string + 20) : nullptr;
 }
 
 static uint64_t PushLuaNumber(uint64_t state, float value)
@@ -1273,10 +1457,12 @@ static uint64_t DlcBitForMap_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a
                                double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
 {
     static const char k_ours[] = "bo3customs:";
-    const char* asked = LuaStringArgument(a1);
+    const char* const query = LuaStringArgument(a1, kQueryMax);
 
-    if (asked && strncmp(asked, k_ours, sizeof(k_ours) - 1) == 0)
-        return PushLuaNumber(a1, T7Share_Query(asked + sizeof(k_ours) - 1));
+    if (query && strncmp(query, k_ours, sizeof(k_ours) - 1) == 0)
+        return PushLuaNumber(a1, T7Share_Query(query + sizeof(k_ours) - 1));
+
+    const char* asked = LuaStringArgument(a1);
 
     if (asked)
     {
@@ -1414,6 +1600,30 @@ static void ClaimStackScript(uintptr_t header, int index)
                     name, owner + 1, base);
 }
 
+static bool BufferHas(const char* buffer, int32_t length, const char* text)
+{
+    const size_t n = strlen(text);
+
+    for (int32_t i = 0; i + (int32_t)n <= length; ++i)
+    {
+        if (buffer[i] == text[0] && memcmp(buffer + i, text, n) == 0)
+            return true;
+    }
+
+    return false;
+}
+
+static bool LoadsOvercharged(uintptr_t header)
+{
+    const int32_t length = *(const int32_t*)(header + 8);
+    const char* const buffer = *(const char* const*)(header + 16);
+
+    if (length <= 0 || length > (8 << 20) || !buffer || !RangeReadable((uintptr_t)buffer, (size_t)length))
+        return false;
+
+    return BufferHas(buffer, length, "T7Overcharged") && BufferHas(buffer, length, "loadlib");
+}
+
 static void NoteUiFile(uintptr_t header, int index)
 {
     const char* const name = *(const char* const*)header;
@@ -1427,10 +1637,24 @@ static void NoteUiFile(uintptr_t header, int index)
         return;
 
     const char* const mod = g_stack[index].mod.name;
+    const bool dll = ContainsNoCase(name, "t7overcharged") || LoadsOvercharged(header);
     bool added = false;
+    bool noted = false;
 
     {
         ClaimLock locked;
+        bool filed = n >= sizeof(g_modUiFiles[0]);
+
+        for (int i = 0; i < g_modUiFileCount && !filed; ++i)
+            filed = EqualsNoCase(g_modUiFiles[i], name) && EqualsNoCase(g_modUiOwners[i], mod);
+
+        if (!filed && g_modUiFileCount < kMaxModUiFiles)
+        {
+            snprintf(g_modUiFiles[g_modUiFileCount], sizeof(g_modUiFiles[0]), "%s", name);
+            snprintf(g_modUiOwners[g_modUiFileCount++], kNameMax, "%s", mod);
+            g_modsLuaDirty.store(true);
+        }
+
         bool known = false;
 
         for (int i = 0; i < g_uiModCount && !known; ++i)
@@ -1441,10 +1665,24 @@ static void NoteUiFile(uintptr_t header, int index)
             snprintf(g_uiMods[g_uiModCount++], kNameMax, "%s", mod);
             added = true;
         }
+
+        bool listed = !dll;
+
+        for (int i = 0; i < g_dllModCount && !listed; ++i)
+            listed = EqualsNoCase(g_dllMods[i], mod);
+
+        if (!listed && g_dllModCount < kMaxMods)
+        {
+            snprintf(g_dllMods[g_dllModCount++], kNameMax, "%s", mod);
+            noted = true;
+        }
     }
 
     if (added)
         T7Log_Write("[Mods] %s has menu files (%s)", mod, name);
+
+    if (noted)
+        T7Log_Write("[Mods] %s loads T7Overcharged, a Windows DLL (%s); the plugin stands in for it", mod, name);
 }
 
 static void RenameStackAsset(uint64_t asset)
@@ -1511,10 +1749,90 @@ static void RenameStackAsset(uint64_t asset)
                 type == kBgCache ? "precache list" : "key/value list", inner, slot);
 }
 
+static PoolGrowth* GrowthFor(int32_t type)
+{
+    static int16_t index[128];
+    static bool built = false;
+
+    if (!built)
+    {
+        for (int16_t& slot : index)
+            slot = -1;
+
+        for (size_t i = 0; i < sizeof(g_poolGrowth) / sizeof(g_poolGrowth[0]); ++i)
+        {
+            if (g_poolGrowth[i].type >= 0 && g_poolGrowth[i].type < 128)
+                index[g_poolGrowth[i].type] = (int16_t)i;
+        }
+
+        built = true;
+    }
+
+    return type >= 0 && type < 128 && index[type] >= 0 ? &g_poolGrowth[index[type]] : nullptr;
+}
+
+static void GrowPool(int32_t type)
+{
+    PoolGrowth* const growth = GrowthFor(type);
+
+    if (!growth)
+        return;
+
+    AssetPool* const pool = (AssetPool*)(g_base + kAssetPools + sizeof(AssetPool) * (uintptr_t)type);
+    const uint32_t step = growth->limit / 8 < kPoolStepMin ? kPoolStepMin
+                        : (growth->limit / 8 > kPoolStepMax ? kPoolStepMax : growth->limit / 8);
+    const uint32_t most = growth->limit < kPoolExtraMin ? kPoolExtraMin : growth->limit;
+
+    if (pool->free || pool->single || pool->size != growth->size || pool->limit != growth->limit + growth->grown)
+        return;
+
+    if (growth->grown >= most)
+    {
+        if (!growth->capped)
+        {
+            growth->capped = true;
+            T7Log_Write("[Pools] the %s pool is full again at %u and has already been doubled", growth->name, pool->limit);
+        }
+
+        return;
+    }
+
+    const size_t bytes = ((size_t)growth->size * step + 0x3FFF) & ~(size_t)0x3FFF;
+    void* block = nullptr;
+
+    if (sceKernelMmap(0, bytes, 1 | 2, 0x1000 | 0x2, -1, 0, &block) < 0 || !block)
+    {
+        T7Log_Write("[Pools] the %s pool is full (%u) and no memory could be added", growth->name, pool->limit);
+        return;
+    }
+
+    for (uint32_t i = 0; i < step; ++i)
+    {
+        const uintptr_t entry = (uintptr_t)block + (uintptr_t)growth->size * i;
+        *(uintptr_t*)entry = i + 1 < step ? entry + growth->size : 0;
+    }
+
+    T7Log_Write("[Pools] the %s pool was full at %u; room for %u more was added", growth->name, pool->limit, step);
+
+    pool->free = (uintptr_t)block;
+    pool->limit += step;
+    growth->grown += step;
+}
+
 static uint64_t LinkXAsset_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
                              double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
 {
     bool owner = false;
+
+#ifdef _DEBUG
+    g_linkCount.fetch_add(1, std::memory_order_relaxed);
+#endif
+
+    if (a1 && g_buildMatched)
+    {
+        GrowPool(*(const int32_t*)a1);
+        T7Log_PoolOut(*(const int32_t*)a1);
+    }
 
     if (a1 && g_stackCount > 0)
         RenameStackAsset(a1);
@@ -1536,22 +1854,20 @@ static uint64_t LinkXAsset_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
 static uint64_t ZonePriority_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
                                double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
 {
+    const uintptr_t from = (uintptr_t)__builtin_return_address(0) - g_base;
+    const bool linkingScript = g_scriptLinker.load(std::memory_order_acquire) == (uint64_t)scePthreadSelf() &&
+                               from > kLinkXAsset && from < kLinkXAssetEnd;
+
     if (((uint32_t)a1 & kModMarker) != 0)
     {
         const uint64_t rank = ((uint32_t)a1 >> kModRankShift) & kModRankMax;
-        const uint64_t priority = kModPriority + 2 * (kModRankMax - rank) + 1;
+        const uint64_t priority = (linkingScript ? kModScriptPriority : kModPriority) + 2 * (kModRankMax - rank) + 1;
         return ((uint32_t)a1 & kLocalizedZone) != 0 ? priority - 1 : priority;
     }
 
     const uint64_t priority = ((Hook_t)g_priorityOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
 
-    if ((uint32_t)a1 != kUsermapZoneFlags || g_scriptLinker.load(std::memory_order_acquire) == 0)
-        return priority;
-
-    const uintptr_t from = (uintptr_t)__builtin_return_address(0) - g_base;
-
-    if (from <= kLinkXAsset || from >= kLinkXAssetEnd ||
-        g_scriptLinker.load(std::memory_order_relaxed) != (uint64_t)scePthreadSelf())
+    if ((uint32_t)a1 != kUsermapZoneFlags || !linkingScript)
         return priority;
 
     return kUsermapScriptPriority;
@@ -1616,7 +1932,7 @@ static uint64_t XPakOpen_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, u
 
         if (index > 0 && index < g_stackCount && strlen(pak) < kNameMax && StackFileIn(g_stack[index], file, false))
         {
-            char* const name = g_xpakNames[g_xpakNameAt.fetch_add(1) % 32];
+            char* const name = g_xpakNames[g_xpakNameAt.fetch_add(1) % kXpakNames];
 
             if (LanguagePrefixed(pak))
                 snprintf(name, kNameMax + 8, "%c%c_m%d_%s", pak[0], pak[1], index + 1, pak + 3);
@@ -2204,18 +2520,9 @@ static void ReportDispatches()
     }
 }
 
-static void StallSignal(int, void* context)
+static void CaptureContext(StallSample& sample, const void* context)
 {
-    if (!context || (uintptr_t)scePthreadSelf() != g_stallTarget.load(std::memory_order_acquire))
-        return;
-
-    int expected = 1;
-
-    if (!g_stallState.compare_exchange_strong(expected, 3, std::memory_order_acq_rel))
-        return;
-
     const uint64_t* const words = (const uint64_t*)context;
-    StallSample& sample = g_stallSample;
     memcpy(sample.raw, words, sizeof(sample.raw));
     sample.mcontext = -1;
     sample.words = 0;
@@ -2250,7 +2557,19 @@ static void StallSignal(int, void* context)
             sample.words = bytes / 8;
         }
     }
+}
 
+static void StallSignal(int, void* context)
+{
+    if (!context || (uintptr_t)scePthreadSelf() != g_stallTarget.load(std::memory_order_acquire))
+        return;
+
+    int expected = 1;
+
+    if (!g_stallState.compare_exchange_strong(expected, 3, std::memory_order_acq_rel))
+        return;
+
+    CaptureContext(g_stallSample, context);
     g_stallState.store(2, std::memory_order_release);
 }
 
@@ -2508,6 +2827,8 @@ static void LogStackWalk(int index, uintptr_t thread)
     ReportLine("%s", line);
 }
 
+static void SampleThreads();
+
 static void SampleStalledThreads(uint32_t round, uint64_t stalledMs)
 {
     uint32_t count[5] = {};
@@ -2548,6 +2869,11 @@ static void SampleStalledThreads(uint32_t round, uint64_t stalledMs)
     if (round == 1)
         ReportDispatches();
 
+    SampleThreads();
+}
+
+static void SampleThreads()
+{
     for (int i = 0; i < kStallThreads; ++i)
     {
         const uintptr_t thread = *(const uintptr_t*)(g_base + kThreadHandles + 8 * (uintptr_t)i);
@@ -2601,19 +2927,49 @@ static void* StallWatch(void*)
     uint64_t level = 0;
     uint64_t lastRound = 0;
     uint32_t rounds = 0;
+    uint32_t idleRounds = 0;
+    uint32_t seenLinks = 0;
+    uint32_t seenFrames = 0;
+    uint64_t quietSince = 0;
 
     for (;;)
     {
         sceKernelUsleep(250000);
 
         const uint64_t start = g_levelStart.load(std::memory_order_relaxed);
+        const uint32_t links = g_linkCount.load(std::memory_order_relaxed);
+        const uint32_t frames = g_comFrames.load(std::memory_order_relaxed);
 
         if (start != level)
         {
             level = start;
             lastRound = 0;
             rounds = 0;
+            quietSince = 0;
         }
+
+        if (links != seenLinks || frames != seenFrames || !quietSince)
+        {
+            seenLinks = links;
+            seenFrames = frames;
+            quietSince = sceKernelGetProcessTime();
+            idleRounds = 0;
+        }
+
+        const uint64_t quiet = sceKernelGetProcessTime() - quietSince;
+
+        if (idleRounds < kStallRounds && quiet >= kLoadStallUs * (idleRounds + 1))
+        {
+            ReportLine("[Stall] the game has made no progress for %llu s (no frame, no asset linked)%s",
+                       (unsigned long long)(quiet / 1000000), start ? " while a level loads" : "");
+            g_poolsWanted.store(true, std::memory_order_release);
+            ++idleRounds;
+            SampleThreads();
+            continue;
+        }
+
+        if (start && g_levelFrames.load(std::memory_order_relaxed) < kStallArmFrames)
+            continue;
 
         if (!start || !*(volatile bool*)&g_inLevel || !g_usermapLevel.load(std::memory_order_relaxed) || rounds >= kStallRounds ||
             g_levelFrames.load(std::memory_order_relaxed) < kStallArmFrames)
@@ -2655,6 +3011,9 @@ static void* StallMirror(void*)
             T7Log_Write("%.*s", (int)(end - line), line);
             written = (size_t)(end - g_report) + 1;
         }
+
+        if (g_poolsWanted.exchange(false, std::memory_order_acq_rel))
+            T7Log_Pools("at the stall", 80);
     }
 
     return nullptr;
@@ -3005,25 +3364,69 @@ static bool AnyModZoneLoaded()
     return false;
 }
 
-static int StackEntries(int from, int mode, ZoneInfo* out, int room)
+static bool HasCompanion(const StackMod& entry, const char* zone)
+{
+    char tail[40];
+    const int length = snprintf(tail, sizeof(tail), "_%s.ff", zone);
+
+    for (int i = 0; i < entry.fileCount; ++i)
+    {
+        const char* const rel = entry.files[i].rel;
+
+        if (strlen(rel) == (size_t)length + 2 && !strchr(rel, '/') && EqualsNoCase(rel + 2, tail))
+            return true;
+    }
+
+    return false;
+}
+
+static int ZoneRecordsFree()
+{
+    return kZoneRecordMax - kLevelZoneRoom - *(const int32_t*)(g_base + kZoneRecordCount);
+}
+
+static int StackEntries(int from, int mode, ZoneInfo* out, int room, int* records, int* through)
 {
     int n = 0;
+    *through = from;
 
     for (int i = from; i < g_stackCount; ++i)
     {
         const uint32_t rank = (uint32_t)i < kModRankMax ? (uint32_t)i : kModRankMax;
         const int32_t flags = (int32_t)((uint32_t)kModZoneFlags | (rank << kModRankShift));
+        int entries = 0;
+        int needed = 0;
 
         for (int k = 0; k < kModZoneKinds; ++k)
         {
             if (!g_stack[i].mod.zones[k] || (k != 0 && k != mode))
                 continue;
 
-            if (n >= room)
-            {
-                T7Log_Write("[Mods] no room for %s in this zone load", g_stack[i].zones[k]);
+            ++entries;
+            needed += HasCompanion(g_stack[i], k_modZones[k]) ? 2 : 1;
+        }
+
+        if (needed > *records)
+        {
+            T7Log_Write("[Mods] the game has no zone slots left for %s (mod %d of %d): it and the mods after it stay unloaded",
+                        g_stack[i].mod.name, i + 1, g_stackCount);
+            break;
+        }
+
+        if (n + entries > room)
+        {
+            T7Log_Write("[Mods] %s (mod %d of %d) and the mods after it load in the next step", g_stack[i].mod.name, i + 1,
+                        g_stackCount);
+            break;
+        }
+
+        *records -= needed;
+        *through = i + 1;
+
+        for (int k = 0; k < kModZoneKinds; ++k)
+        {
+            if (!g_stack[i].mod.zones[k] || (k != 0 && k != mode))
                 continue;
-            }
 
             out[n].name = g_stack[i].zones[k];
             out[n].allocFlags = flags;
@@ -3122,8 +3525,13 @@ static int AddModZones(const ZoneInfo* zones, int count, ZoneInfo* out)
     ResetScriptClaims();
 
     memcpy(out, zones, (size_t)count * sizeof(ZoneInfo));
-    const int added = StackEntries(0, mode, out + count, room);
-    SetLoaded(added > 0 ? g_stackCount : 0);
+    int records = ZoneRecordsFree() - 2 * count;
+    int through = 0;
+    const int added = StackEntries(0, mode, out + count, room, &records, &through);
+    SetLoaded(added > 0 ? through : 0);
+
+    if (added > 0 && through < g_stackCount)
+        g_applyWanted.store(true);
 
     for (int i = 0; i < added; ++i)
         T7Log_Write("[Mods] %s loads with %s", out[count + i].name, k_modeCommons[mode]);
@@ -3233,6 +3641,7 @@ static uint64_t LoadXAssets_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4
         ListReader reading;
         bool custom = false;
         bool level = false;
+        char customName[kNameMax] = {};
 
         for (int i = 0; i < count; ++i)
         {
@@ -3243,13 +3652,21 @@ static uint64_t LoadXAssets_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4
             else if (zones[i].freeFlags & 0x100)
                 g_inLevel = false;
 
-            custom = custom || (zones[i].name && MapPackage(zones[i].name) >= 0);
+            if (zones[i].name && MapPackage(zones[i].name) >= 0)
+            {
+                if (!custom)
+                    snprintf(customName, sizeof(customName), "%s", zones[i].name);
+
+                custom = true;
+            }
+
             level = level || (zones[i].name && (zones[i].allocFlags & 0x100));
         }
 
         if (level)
         {
-            g_usermapLevel.store(custom, std::memory_order_relaxed);
+            snprintf(g_usermapName, sizeof(g_usermapName), "%s", customName);
+            g_usermapLevel.store(custom, std::memory_order_release);
             g_textureWaitStart.store(0, std::memory_order_relaxed);
             g_texturesForced.store(false, std::memory_order_relaxed);
 #ifdef _DEBUG
@@ -3272,6 +3689,7 @@ static uint64_t LoadXAssets_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4
             T7Log_NewLevel();
 #ifdef _DEBUG
             WatchBuiltins(true);
+            T7Log_Pools("before the level", 60);
 #endif
         }
 
@@ -3363,21 +3781,35 @@ static void AppendMods(const char (*names)[kNameMax], int wanted, int mode)
     if (from == 0)
         ResetScriptClaims();
 
-    ZoneInfo zones[kMaxZoneCall];
-    const int count = StackEntries(from, mode, zones, kExpandedZones / 2);
-    SetLoaded(g_stackCount);
+    int records = ZoneRecordsFree();
+    int loads = 0;
 
-    if (count <= 0)
+    for (int at = from; at < g_stackCount;)
     {
-        T7Log_Write("[Mods] the newly ticked mods have nothing for %s", k_modeCommons[mode]);
-        return;
+        ZoneInfo zones[kMaxZoneCall];
+        int through = at;
+        const int count = StackEntries(at, mode, zones, kExpandedZones / 2, &records, &through);
+
+        if (through == at)
+            break;
+
+        SetLoaded(through);
+
+        for (int i = 0; i < count; ++i)
+            T7Log_Write("[Mods] %s loads now (%s is already loaded)", zones[i].name, k_modeCommons[mode]);
+
+        if (count > 0)
+        {
+            WaitForModZones(zones, count, at);
+            LoadXAssets_h((uint64_t)zones, (uint64_t)count, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+            ++loads;
+        }
+
+        at = through;
     }
 
-    for (int i = 0; i < count; ++i)
-        T7Log_Write("[Mods] %s loads now (%s is already loaded)", zones[i].name, k_modeCommons[mode]);
-
-    WaitForModZones(zones, count, from);
-    LoadXAssets_h((uint64_t)zones, (uint64_t)count, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    if (loads == 0 && g_loadedCount > from)
+        T7Log_Write("[Mods] the newly ticked mods have nothing for %s", k_modeCommons[mode]);
 }
 
 static void ApplyModsBeforeLevel(const char* level)
@@ -3587,6 +4019,19 @@ static bool IsUiMod(const char* name)
     for (int i = 0; i < g_uiModCount; ++i)
     {
         if (EqualsNoCase(g_uiMods[i], name))
+            return true;
+    }
+
+    return false;
+}
+
+static bool IsDllMod(const char* name)
+{
+    ClaimLock locked;
+
+    for (int i = 0; i < g_dllModCount; ++i)
+    {
+        if (EqualsNoCase(g_dllMods[i], name))
             return true;
     }
 
@@ -4647,6 +5092,8 @@ static void FindPreview(Package& package, const char* json)
         snprintf(package.preview, sizeof(package.preview), "%s", file);
 }
 
+static bool AllDigits(const char* text);
+
 static void BuildCustomMapsLua()
 {
     char* const out = g_customMapsLua;
@@ -4674,6 +5121,7 @@ static void BuildCustomMapsLua()
 
         char title[160];
         snprintf(title, sizeof(title), "%s", package.name);
+        char workshop[32] = {};
         raw[0] = 0;
 
         char* const json = ReadSmallFile(path, 64 * 1024);
@@ -4684,6 +5132,9 @@ static void BuildCustomMapsLua()
                 snprintf(title, sizeof(title), "%s", package.name);
 
             JsonString(json, "Description", raw, sizeof(raw));
+
+            if (!JsonString(json, "PublisherID", workshop, sizeof(workshop)) || !AllDigits(workshop))
+                workshop[0] = 0;
         }
 
         FormatDescription(raw, description, sizeof(description));
@@ -4724,6 +5175,12 @@ static void BuildCustomMapsLua()
             AppendLuaString(entry, sizeof(entry), &length, title);
             Append(entry, sizeof(entry), &length, ", desc = ");
             AppendLuaString(entry, sizeof(entry), &length, description);
+
+            if (workshop[0])
+            {
+                Append(entry, sizeof(entry), &length, ", ugc = ");
+                AppendLuaString(entry, sizeof(entry), &length, workshop);
+            }
 
             if (preview)
             {
@@ -4796,6 +5253,16 @@ static bool ModNameValid(const char* name)
     return n > 0 && name[0] != '.' && name[0] != ' ';
 }
 
+static uint32_t ModPictureKey(const char* name)
+{
+    uint32_t hash = 0x811C9DC5u;
+
+    for (const char* c = name; *c; ++c)
+        hash = (hash ^ (uint8_t)((*c >= 'A' && *c <= 'Z') ? *c + 32 : *c)) * 0x01000193u;
+
+    return hash;
+}
+
 static bool AllDigits(const char* text)
 {
     if (!text[0])
@@ -4810,38 +5277,69 @@ static bool AllDigits(const char* text)
     return true;
 }
 
+static bool FindModFile(const Mod& mod, const char* file, char* out, size_t size)
+{
+    SceKernelStat st;
+    char parent[224];
+    snprintf(parent, sizeof(parent), "%s", mod.folder);
+    char* const slash = strrchr(parent, '/');
+
+    if (slash && strcmp(slash, "/zone") == 0)
+        *slash = 0;
+    else
+        parent[0] = 0;
+
+    for (const char* const folder : { (const char*)mod.folder, (const char*)mod.alternate, (const char*)parent })
+    {
+        if (!folder[0])
+            continue;
+
+        snprintf(out, size, "%s/%s", folder, file);
+
+        if (sceKernelStat(out, &st) == 0)
+            return true;
+    }
+
+    out[0] = 0;
+    return false;
+}
+
+static void FindModPreview(Mod& mod, const char* json)
+{
+    if (FindModFile(mod, "previewimage.png", mod.preview, sizeof(mod.preview)))
+        return;
+
+    char thumbnail[260];
+
+    if (!json || !JsonString(json, "Thumbnail", thumbnail, sizeof(thumbnail)))
+        return;
+
+    const char* file = thumbnail;
+
+    for (const char* c = thumbnail; *c; ++c)
+    {
+        if (*c == '/' || *c == '\\')
+            file = c + 1;
+    }
+
+    const size_t length = strlen(file);
+
+    if (length > 4 && EqualsNoCase(file + length - 4, ".png"))
+        FindModFile(mod, file, mod.preview, sizeof(mod.preview));
+}
+
 static void ReadModInfo(Mod& mod)
 {
     snprintf(mod.title, sizeof(mod.title), "%s", mod.name);
     snprintf(mod.ugc, sizeof(mod.ugc), "%s", mod.name);
     snprintf(mod.internal, sizeof(mod.internal), "%s", mod.name);
+    mod.preview[0] = 0;
+    free(mod.description);
+    mod.description = nullptr;
 
-    char* json = nullptr;
-
-    for (const char* const folder : { mod.folder, mod.alternate })
-    {
-        if (!json && folder[0])
-        {
-            char path[288];
-            snprintf(path, sizeof(path), "%s/workshop.json", folder);
-            json = ReadSmallFile(path, 64 * 1024);
-        }
-    }
-
-    if (!json)
-    {
-        char parent[224];
-        snprintf(parent, sizeof(parent), "%s", mod.folder);
-        char* const slash = strrchr(parent, '/');
-
-        if (slash && strcmp(slash, "/zone") == 0)
-        {
-            *slash = 0;
-            char path[288];
-            snprintf(path, sizeof(path), "%s/workshop.json", parent);
-            json = ReadSmallFile(path, 64 * 1024);
-        }
-    }
+    char path[288];
+    char* const json = FindModFile(mod, "workshop.json", path, sizeof(path)) ? ReadSmallFile(path, 64 * 1024) : nullptr;
+    FindModPreview(mod, json);
 
     if (!json)
         return;
@@ -4856,6 +5354,15 @@ static void ReadModInfo(Mod& mod)
 
     if (JsonString(json, "FolderName", value, sizeof(value)) && value[0] && strlen(value) < sizeof(mod.internal))
         snprintf(mod.internal, sizeof(mod.internal), "%s", value);
+
+    static char raw[kRawDescriptionMax];
+    static char description[kDescriptionMax];
+    raw[0] = 0;
+    JsonString(json, "Description", raw, sizeof(raw));
+    FormatDescription(raw, description, sizeof(description));
+
+    if (description[0])
+        mod.description = strdup(description);
 
     free(json);
 }
@@ -4879,6 +5386,7 @@ static void ScanMods(const char* data)
         snprintf(zone, sizeof(zone), "%s/zone", base);
 
         Mod& mod = g_mods[g_modCount];
+        free(mod.description);
         memset(&mod, 0, sizeof(mod));
         snprintf(mod.name, sizeof(mod.name), "%s", folders[i]);
 
@@ -4912,49 +5420,6 @@ static void ScanMods(const char* data)
     }
 }
 
-static void ReadChosenMods()
-{
-    g_chosenCount = 0;
-
-    char* const text = ReadSmallFile(k_chosenModFile, 2048);
-
-    if (!text)
-        return;
-
-    char* line = text;
-
-    while (*line && g_chosenCount < kMaxStack)
-    {
-        char* end = line;
-
-        while (*end && *end != '\n' && *end != '\r' && *end != ',')
-            ++end;
-
-        const char stop = *end;
-        *end = 0;
-
-        size_t n = strlen(line);
-
-        while (n > 0 && line[n - 1] == ' ')
-            line[--n] = 0;
-
-        bool duplicate = false;
-
-        for (int i = 0; i < g_chosenCount; ++i)
-            duplicate = duplicate || EqualsNoCase(g_chosen[i], line);
-
-        if (!duplicate && ModNameValid(line))
-            snprintf(g_chosen[g_chosenCount++], kNameMax, "%s", line);
-
-        if (!stop)
-            break;
-
-        line = end + 1;
-    }
-
-    free(text);
-}
-
 static bool WriteChosenMods(const char (*names)[kNameMax], int count)
 {
     const int fd = sceKernelOpen(k_chosenModFile, SCE_KERNEL_O_WRONLY | SCE_KERNEL_O_CREAT | SCE_KERNEL_O_TRUNC, 0777);
@@ -4975,7 +5440,42 @@ static bool WriteChosenMods(const char (*names)[kNameMax], int count)
     return written;
 }
 
-static char g_modsLua[48 * 1024];
+static void AppendModFiles(char* out, size_t size, size_t* at)
+{
+    size_t& used = *at;
+    ClaimLock locked;
+
+    for (int i = 0; i < g_modUiFileCount; ++i)
+    {
+        bool loaded = false;
+
+        for (int k = 0; k < g_loadedCount && !loaded; ++k)
+            loaded = EqualsNoCase(g_loaded[k], g_modUiOwners[i]);
+
+        if (!loaded || used + 256 >= size)
+            continue;
+
+        char lower[sizeof(g_modUiFiles[0])];
+        size_t k = 0;
+
+        for (; g_modUiFiles[i][k] && k + 1 < sizeof(lower); ++k)
+        {
+            const char c = g_modUiFiles[i][k];
+            lower[k] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+        }
+
+        lower[k] = 0;
+        Append(out, size, &used, "  [");
+        AppendLuaString(out, size, &used, lower);
+        Append(out, size, &used, "] = ");
+        AppendLuaString(out, size, &used, g_modUiFiles[i]);
+        Append(out, size, &used, ",\n");
+    }
+}
+
+static char g_modFilesLua[64 * 1024];
+
+static char g_modsLua[256 * 1024];
 
 static void BuildModsLua()
 {
@@ -4989,7 +5489,7 @@ static void BuildModsLua()
     for (int i = 0; i < g_modCount; ++i)
     {
         const Mod& mod = g_mods[i];
-        char entry[1024];
+        static char entry[kDescriptionMax * 2 + 1024];
         size_t length = 0;
         entry[0] = 0;
         Append(entry, sizeof(entry), &length, "  { name = ");
@@ -5004,9 +5504,24 @@ static void BuildModsLua()
         Append(entry, sizeof(entry), &length, mod.zones[1] ? ", zm = true" : "");
         Append(entry, sizeof(entry), &length, mod.zones[2] ? ", mp = true" : "");
         Append(entry, sizeof(entry), &length, mod.zones[3] ? ", cp = true" : "");
+
+        if (mod.description)
+        {
+            Append(entry, sizeof(entry), &length, ", description = ");
+            AppendLuaString(entry, sizeof(entry), &length, mod.description);
+        }
+
+        if (mod.preview[0])
+        {
+            char picture[40];
+            snprintf(picture, sizeof(picture), T7_MOD_PREVIEW_PREFIX "%08x", ModPictureKey(mod.name));
+            Append(entry, sizeof(entry), &length, ", image = ");
+            AppendLuaString(entry, sizeof(entry), &length, picture);
+        }
+
         Append(entry, sizeof(entry), &length, " },\n");
 
-        if (used + length + 1024 < size)
+        if (used + length + 16384 < size)
         {
             memcpy(out + used, entry, length + 1);
             used += length;
@@ -5050,6 +5565,8 @@ static void BuildModsLua()
         Append(out, size, &used, StackModReady(i, mode) ? " },\n" : ", loading = true },\n");
     }
 
+    Append(out, size, &used, "})\nrawset(_G, \"BO3CustomsModFiles\", {\n");
+    AppendModFiles(out, size, &used);
     Append(out, size, &used, "})\n");
     Append(out, size, &used, g_refreshOnClose ? "rawset(_G, \"BO3CustomsModsRefresh\", true)\n"
                                               : "rawset(_G, \"BO3CustomsModsRefresh\", false)\n");
@@ -5071,6 +5588,10 @@ static void BuildModsLua()
         AppendLuaString(out, size, &used, mod.internal);
         Append(out, size, &used, " })\n");
     }
+
+    Append(out, size, &used, "rawset(_G, \"BO3CustomsModsNotice\", ");
+    AppendLuaString(out, size, &used, g_modNotice);
+    Append(out, size, &used, ")\n");
 
     Append(out, size, &used,
            "local ui = rawget(_G, \"BO3CustomsModsUI\")\n"
@@ -5575,10 +6096,8 @@ void T7Maps_Install(uintptr_t base)
     g_base = base;
 
     ScanAll();
-    ReadChosenMods();
-
-    if (g_chosenCount > 0)
-        T7Log_Write("[Mods] %d mod(s) ticked, first %s", g_chosenCount, g_chosen[0]);
+    g_chosenCount = 0;
+    sceKernelUnlink(k_chosenModFile);
 
     InstallHooks(base);
 }
@@ -5710,6 +6229,24 @@ bool T7Maps_MapFile(const char* map, const char* file, char* path, size_t size)
     return package >= 0 && FindPackageFile(g_packages[package], file, path, size);
 }
 
+bool T7Maps_ModPreviewFile(uint32_t key, char* path, size_t size)
+{
+    using namespace T7Maps;
+
+    ListReader reading;
+
+    for (int i = 0; g_base && i < g_modCount; ++i)
+    {
+        if (g_mods[i].preview[0] && ModPictureKey(g_mods[i].name) == key)
+        {
+            snprintf(path, size, "%s", g_mods[i].preview);
+            return true;
+        }
+    }
+
+    return false;
+}
+
 const char* T7Maps_PreviewFile(const char* map)
 {
     using namespace T7Maps;
@@ -5741,12 +6278,77 @@ void T7Maps_MenusBuilt()
     T7Maps::g_reloadHeld = false;
 }
 
+bool T7Maps_MenusBroken()
+{
+    using namespace T7Maps;
+
+    if (!g_base || g_inLevel)
+        return false;
+
+    int culprit = -1;
+
+    for (int i = g_loadedCount - 1; i >= 0 && culprit < 0; --i)
+    {
+        if (IsUiMod(g_loaded[i]))
+            culprit = i;
+    }
+
+    if (culprit < 0)
+    {
+        T7Log_Write("[Mods] the menus did not build, and no loaded mod has menu files");
+        return false;
+    }
+
+    char name[kNameMax];
+    snprintf(name, sizeof(name), "%s", g_loaded[culprit]);
+
+    if (g_sessionModCount >= 0)
+    {
+        T7Log_Write("[Mods] the menus did not build with %s loaded; the host chose the mods, so it stays", name);
+        return false;
+    }
+
+    char names[kMaxStack][kNameMax];
+    int count = 0;
+
+    for (int i = 0; i < g_chosenCount; ++i)
+    {
+        if (!EqualsNoCase(g_chosen[i], name))
+            snprintf(names[count++], kNameMax, "%s", g_chosen[i]);
+    }
+
+    if (!WriteChosenMods(names, count))
+        T7Log_Write("[Mods] the choice could not be saved to %s", k_chosenModFile);
+
+    g_chosenCount = count;
+
+    for (int i = 0; i < count; ++i)
+        snprintf(g_chosen[i], kNameMax, "%s", names[i]);
+
+    const int found = FindMod(name);
+    snprintf(g_modNotice, sizeof(g_modNotice), "%s is off: its menus did not load on this console.",
+             found >= 0 ? g_mods[found].title : name);
+
+    T7Log_Write("[Mods] the menus did not build with %s loaded%s; it is unticked and unloads now", name,
+                IsDllMod(name) ? " (it loads T7Overcharged, a Windows DLL)" : "");
+    Notify("BO3 Customs\n%s", g_modNotice);
+
+    g_reloadHeld = false;
+    g_modsLuaDirty.store(true);
+    g_applyWanted.store(true);
+    return true;
+}
+
 void T7Maps_FrameWork()
 {
     using namespace T7Maps;
 
     if (!g_base)
         return;
+
+#ifdef _DEBUG
+    g_comFrames.fetch_add(1, std::memory_order_relaxed);
+#endif
 
     if (g_inLevel)
     {
@@ -5821,6 +6423,63 @@ void T7Maps_FrameWork()
     ReloadFrontend(forced ? "a mod with menu files was unloaded" : "a mod with menu files finished loading");
 }
 
+bool T7Maps_DllModLoaded()
+{
+    using namespace T7Maps;
+
+    for (int i = 0; i < g_loadedCount; ++i)
+    {
+        if (IsDllMod(g_loaded[i]))
+            return true;
+    }
+
+    return false;
+}
+
+bool T7Maps_ModSave(char* out, size_t size)
+{
+    using namespace T7Maps;
+
+    int chosen = -1;
+
+    for (int i = 0; i < g_loadedCount && chosen < 0; ++i)
+    {
+        if (IsDllMod(g_loaded[i]))
+            chosen = i;
+    }
+
+    if (chosen < 0 && g_loadedCount > 0)
+        chosen = 0;
+
+    const char* owner = chosen >= 0 ? g_loaded[chosen] : nullptr;
+
+    if (!owner && g_usermapLevel.load(std::memory_order_acquire) && g_usermapName[0])
+        owner = g_usermapName;
+
+    if (!owner)
+    {
+        if (size)
+            out[0] = 0;
+
+        return false;
+    }
+
+    snprintf(out, size, "/data/BO3-Customs/saves");
+    sceKernelMkdir(out, 0777);
+    snprintf(out, size, "/data/BO3-Customs/saves/%s", owner);
+    sceKernelMkdir(out, 0777);
+    snprintf(out, size, "/data/BO3-Customs/saves/%s/", owner);
+    return true;
+}
+
+void T7Maps_FirstModUgc(char* out, size_t size)
+{
+    using namespace T7Maps;
+
+    const int found = g_loadedCount > 0 ? FindMod(g_loaded[0]) : -1;
+    snprintf(out, size, "%s", found >= 0 ? g_mods[found].ugc : "");
+}
+
 int T7Maps_SelectMod(const char* list, char* message, size_t size)
 {
     using namespace T7Maps;
@@ -5877,6 +6536,7 @@ int T7Maps_SelectMod(const char* list, char* message, size_t size)
     for (int i = 0; i < count; ++i)
         snprintf(g_chosen[i], kNameMax, "%s", names[i]);
 
+    g_modNotice[0] = 0;
     g_modsLuaDirty.store(true);
     T7Log_Write("[Mods] ticked: %d mod(s)%s%s", count, count > 0 ? ", first " : "", count > 0 ? names[0] : "");
 
@@ -5937,6 +6597,21 @@ const char* T7Maps_ModsLua()
     return g_modsLua;
 }
 
+const char* T7Maps_ModFilesLua()
+{
+    using namespace T7Maps;
+
+    char* const out = g_modFilesLua;
+    const size_t size = sizeof(g_modFilesLua);
+    size_t used = 0;
+
+    out[0] = 0;
+    Append(out, size, &used, "if rawget(_G, \"BO3CustomsModFiles\") ~= nil then return end\nrawset(_G, \"BO3CustomsModFiles\", {\n");
+    AppendModFiles(out, size, &used);
+    Append(out, size, &used, "})\n");
+    return out;
+}
+
 bool T7Maps_ModsChanged()
 {
     return T7Maps::g_modsLuaDirty.load(std::memory_order_relaxed);
@@ -5958,6 +6633,25 @@ static_assert(sizeof(T7Maps::Mod::folder) == kT7SharePath, "shared paths use the
 static void ContentRoot(const char* folder, const char* alternate, char* out, size_t size)
 {
     snprintf(out, size, "%s", T7Maps::EndsWith(folder, "/zone") && alternate[0] ? alternate : folder);
+}
+
+int T7Maps_MapNames(char (*names)[kT7ShareName], int capacity)
+{
+    using namespace T7Maps;
+
+    if (!g_base || !names || capacity <= 0)
+        return 0;
+
+    ListReader reading;
+    int count = 0;
+
+    for (int i = 0; i < g_packageCount && count < capacity; ++i)
+    {
+        if (g_packages[i].map)
+            snprintf(names[count++], kT7ShareName, "%s", g_packages[i].name);
+    }
+
+    return count;
 }
 
 bool T7Maps_HasMap(const char* name)

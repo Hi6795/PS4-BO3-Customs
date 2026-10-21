@@ -2,6 +2,72 @@
 
 Changes to the plugin (`BO3-Customs.sprx`) and the tool (PS4 .FF Porter). Newest first.
 
+## 4.00
+
+Everything since [v3.00][3.00].
+
+### Plugin
+
+**Added**
+- Mods that need a PC DLL ***may work***, though not all
+- Mods and maps save their files (stats, settings) in `/data/BO3-Customs/saves/`.
+- PS4 keyboard for mod text boxes.
+- The quit command closes the game.
+- Touchpad mouse in menus and the pause menu.
+- MODS menu shows each mod's picture and description.
+- Right stick scrolls map and mod descriptions.
+<br>
+- LAN: download screen shows the host's read and upload speeds and your download and write speeds.
+- LAN: downloads skip other languages' files.
+- LAN: cards next to players missing the map: "MISSING MAP", "MISSING DLC" or "DOWNLOADING 45%".
+- LAN: the host's map list shows how many players are missing each map.
+- LAN: player menu to promote to host, kick, ban or mute (replaces the PSN profile).
+- LAN: promoting switches to Shadows of Evil first if anyone is missing the map.
+- LAN: starting while players are still downloading asks first.
+- LAN: ping on the scoreboard.
+
+**Changed**
+- No mod limit beyond what the game has room for.
+- Mods start unticked every launch.
+- Max FPS 0 removes the cap.
+- In a match the touchpad opens the scoreboard; the pointer only works when paused.
+- Mod scripts, menus and PC-only menu files take priority, as on PC.
+
+**Fixed**
+- Mod freezes, crashes and broken menus; a mod whose menus fail is turned off.
+- "UI Error" opening controller settings.
+- "UI Error 9813" joining a Zombies LAN lobby.
+- Touchpad pointer did nothing in menus.
+- LAN downloads between homes: they now go through the game's connection and resume.
+- LAN downloads were slow, flooded the host's upload and missed files in deeper mod folders.
+- "Could not download" notices for maps the lobby only passed through.
+- "Client/Server Index Mismatch" joining with your own mods loaded.
+
+### Tool
+
+**Added**
+- Warning before converting a mod that needs a PC DLL.
+- GPU video: map videos encode on NVIDIA or AMD cards, about 7x faster.
+- Ctrl+A in the installed maps and mods picker.
+- Multi-core switch in Settings.
+
+**Changed**
+- Converted maps go to `exports/usermaps/`, mods to `exports/mods/`.
+- About twice as fast on big maps.
+- Time left is far more accurate and learns your PC's speed.
+- A paused Community download no longer holds up the others.
+- Async is now called Parallel.
+
+**Fixed**
+- Every map failed on PCs without AVX.
+- Every map failed on PCs without the Visual C++ runtime ("acts could not decompile script"); it now ships with the tool.
+- "Guarded zone allocation failed" on PCs with less memory.
+- "No PC shader reflection" on slow PCs or with antivirus scanning.
+- Sending to the console failed on most FTP servers.
+- Cancel was ignored between a Community download and its send.
+- "Waiting" showed in green on some rows.
+- An unreadable movie was reported as a GPU encoder failure.
+
 ## 3.00
 
 Everything since [v2.00][2.00].
@@ -177,6 +243,7 @@ First release.
 
 </details>
 
+[3.00]: https://github.com/ItsJokerZz/PS4-BO3-Customs/releases/tag/v3.00
 [2.00]: https://github.com/ItsJokerZz/PS4-BO3-Customs/releases/tag/v2.00
 [1.51]: https://github.com/ItsJokerZz/PS4-BO3-Customs/releases/tag/v1.51
 [1.50]: https://github.com/ItsJokerZz/PS4-BO3-Customs/releases/tag/v1.50

@@ -1,0 +1,130 @@
+<Window x:Class="CommunityUploader.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="PS4 .FF Porter - Black Ops III Community Uploader" Width="960" Height="800" MinWidth="820" MinHeight="600"
+        Background="{DynamicResource Bg.App}" WindowStartupLocation="CenterScreen"
+        FontFamily="Segoe UI Variable Text, Segoe UI" UseLayoutRounding="True">
+  <Window.Resources>
+    <DataTemplate x:Key="Row">
+      <Border Padding="14,8" BorderBrush="{DynamicResource Border.Subtle}" BorderThickness="0,0,0,1">
+        <Grid>
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="34"/>
+            <ColumnDefinition Width="58"/>
+            <ColumnDefinition Width="200"/>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="84"/>
+            <ColumnDefinition Width="200"/>
+          </Grid.ColumnDefinitions>
+          <CheckBox IsChecked="{Binding Selected, Mode=TwoWay}" IsEnabled="{Binding CanSelect}" VerticalAlignment="Center"/>
+          <Border Grid.Column="1" Style="{StaticResource KindTag}" Tag="{Binding Tag}">
+            <TextBlock Text="{Binding Tag}" Tag="{Binding Tag}" Style="{StaticResource KindText}"/>
+          </Border>
+          <TextBlock Grid.Column="2" Text="{Binding Name}" FontSize="14" Foreground="{DynamicResource Text.Primary}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Margin="0,0,10,0" ToolTip="{Binding Name}"/>
+          <TextBlock Grid.Column="3" Text="{Binding Title}" Style="{StaticResource Text.Caption}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Margin="0,0,12,0" ToolTip="{Binding Title}"/>
+          <TextBlock Grid.Column="4" Text="{Binding SizeText}" Style="{StaticResource Text.Caption}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+          <TextBlock Grid.Column="5" Text="{Binding Status}" Tag="{Binding Tone}" Style="{StaticResource RowStatus}" Margin="18,0,0,0" ToolTip="{Binding Status}"/>
+        </Grid>
+      </Border>
+    </DataTemplate>
+  </Window.Resources>
+
+  <Grid x:Name="Root" Margin="24,20,24,20">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <Grid>
+      <TextBlock Text="PS4 .FF Porter - Black Ops III Community Uploader" Style="{StaticResource Text.Title}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+      <Border Style="{StaticResource Segment}" HorizontalAlignment="Right">
+        <StackPanel Orientation="Horizontal">
+          <RadioButton x:Name="LocalTab" Style="{StaticResource Tab.Segment}" GroupName="View" IsChecked="True" Content="On this PC" Click="ViewClick" ToolTip="Maps and mods you can upload"/>
+          <RadioButton x:Name="PublishedTab" Style="{StaticResource Tab.Segment}" GroupName="View" Content="Published" Click="ViewClick" ToolTip="What is in the Community list now"/>
+        </StackPanel>
+      </Border>
+    </Grid>
+
+    <Grid Grid.Row="1" Margin="0,16,0,0">
+      <Grid x:Name="LocalBar">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <TextBox x:Name="FolderBox" ToolTip="A folder of maps or mods, or one that holds usermaps and mods folders"/>
+        <Button x:Name="BrowseButton" Grid.Column="1" Content="Browse" Style="{StaticResource Button.Ghost}" Margin="8,0,0,0" Click="BrowseClick"/>
+        <Button x:Name="RefreshButton" Grid.Column="2" Content="Refresh" Style="{StaticResource Button.Ghost}" Margin="8,0,0,0" Click="RefreshClick"/>
+      </Grid>
+      <Grid x:Name="PublishedBar" Visibility="Collapsed" MinHeight="38">
+        <TextBlock Text="Everything the Community tab offers right now." Style="{StaticResource Text.Caption}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+        <Button x:Name="ReloadButton" Content="Refresh" Style="{StaticResource Button.Ghost}" HorizontalAlignment="Right" Click="RefreshClick"/>
+      </Grid>
+    </Grid>
+
+    <Border Grid.Row="2" Style="{StaticResource Card}" Margin="0,12,0,0">
+      <Grid>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <Border Padding="14,10" BorderBrush="{DynamicResource Border.Subtle}" BorderThickness="0,0,0,1">
+          <Grid>
+            <CheckBox x:Name="AllBox" Content="All" Click="AllClick" VerticalAlignment="Center"/>
+            <TextBlock x:Name="SummaryText" Style="{StaticResource Text.Caption}" HorizontalAlignment="Right" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+          </Grid>
+        </Border>
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <Grid>
+            <ItemsControl x:Name="Rows" ItemTemplate="{StaticResource Row}"/>
+            <ItemsControl x:Name="PublishedRows" ItemTemplate="{StaticResource Row}" Visibility="Collapsed"/>
+            <TextBlock x:Name="EmptyText" Style="{StaticResource Text.Caption}" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,40" Visibility="Collapsed"/>
+          </Grid>
+        </ScrollViewer>
+      </Grid>
+    </Border>
+
+    <Grid x:Name="KeyRow" Grid.Row="3" Margin="0,12,0,0">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="230"/>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+      <TextBlock Text="Key ID" Style="{StaticResource Text.Caption}" VerticalAlignment="Center" Margin="0,0,10,0" ToolTip="The keyID of your storage application key"/>
+      <TextBox x:Name="KeyIdBox" Grid.Column="1" Height="38" VerticalAlignment="Center"/>
+      <TextBlock Grid.Column="2" Text="Key" Style="{StaticResource Text.Caption}" VerticalAlignment="Center" Margin="16,0,10,0" ToolTip="The applicationKey, shown only once when the key was made"/>
+      <PasswordBox x:Name="KeyBox" Grid.Column="3" Height="38" VerticalAlignment="Center"/>
+      <CheckBox x:Name="RememberBox" Grid.Column="4" Content="Remember on this PC" IsChecked="True" VerticalAlignment="Center" Margin="16,0,0,0" ToolTip="Kept encrypted for your Windows account only"/>
+    </Grid>
+
+    <Grid Grid.Row="4" Margin="0,14,0,0">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+      <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+        <ProgressBar x:Name="Overall" Minimum="0" Maximum="1" Value="0"/>
+        <TextBlock x:Name="StatusText" Style="{StaticResource Text.Caption}" Margin="0,7,0,0" TextTrimming="CharacterEllipsis"/>
+      </StackPanel>
+      <Button x:Name="StopButton" Grid.Column="1" Content="Stop" Style="{StaticResource Button.Ghost}" MinWidth="96" IsEnabled="False" Click="StopClick"/>
+      <Grid Grid.Column="2" Margin="8,0,0,0">
+        <Button x:Name="UploadButton" Content="Upload" Style="{StaticResource Button.Primary}" MinWidth="150" Click="UploadClick"/>
+        <StackPanel x:Name="PublishedActions" Orientation="Horizontal" Visibility="Collapsed">
+          <Button x:Name="UnlistButton" Content="Take off the list" Style="{StaticResource Button.Ghost}" Click="UnlistClick" ToolTip="Hides it from the Community tab; its files stay on the server"/>
+          <Button x:Name="DeleteButton" Content="Delete from server" Style="{StaticResource Button.Danger}" MinWidth="150" Margin="8,0,0,0" Click="UnlistClick" ToolTip="Takes it off the list and deletes its files"/>
+        </StackPanel>
+      </Grid>
+    </Grid>
+
+    <Border Grid.Row="5" Style="{StaticResource Card}" Margin="0,14,0,0" Height="132" Padding="12,8">
+      <TextBox x:Name="LogBox" Style="{StaticResource TextBox.Log}" TextWrapping="Wrap" HorizontalScrollBarVisibility="Disabled"/>
+    </Border>
+  </Grid>
+</Window>

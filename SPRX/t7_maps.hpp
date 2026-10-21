@@ -26,6 +26,8 @@ bool T7Maps_MapFile(const char* map, const char* file, char* path, size_t size);
 
 const char* T7Maps_PreviewFile(const char* map);
 
+bool T7Maps_ModPreviewFile(uint32_t key, char* path, size_t size);
+
 void T7Maps_FrameHeartbeat();
 
 void T7Maps_FrameWork();
@@ -36,9 +38,19 @@ void T7Maps_RequestPrefetch();
 
 void T7Maps_MenusBuilt();
 
+bool T7Maps_MenusBroken();
+
+bool T7Maps_DllModLoaded();
+
+void T7Maps_FirstModUgc(char* out, size_t size);
+
+bool T7Maps_ModSave(char* out, size_t size);
+
 int T7Maps_SelectMod(const char* name, char* message, size_t size);
 
 const char* T7Maps_ModsLua();
+
+const char* T7Maps_ModFilesLua();
 
 bool T7Maps_ModsChanged();
 
@@ -47,6 +59,8 @@ int T7Maps_ModCount();
 bool T7Maps_UsingMods();
 
 bool T7Maps_HasMap(const char* name);
+
+int T7Maps_MapNames(char (*names)[kT7ShareName], int capacity);
 
 bool T7Maps_EngineHasMap(const char* name);
 

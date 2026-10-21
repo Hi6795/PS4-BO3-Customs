@@ -21,14 +21,11 @@ If your console runs an FTP server, the tool does steps 1, 2 and 4 for you: see 
 ## The tool
 
 - **Convert**: drop maps or mods in, or use **Add** to pick from what you have installed.
-  Each one gets a score when it is done. 99% means everything came across; anything lower lists what to look at.
 - **Converted**: everything you have converted, ready to send to the console.
 - **Community**: maps and mods that are already converted, ready to download.
 - **Installed**: what is on your console. Maps and mods can be removed from here.
 - **Settings**: your console, where maps are sent, and updates.
 
-Converted files go to the `exports` folder beside the tool unless you choose another one.
-The tool updates itself when a newer release is out.
 
 ## Sending to the console
 
@@ -40,6 +37,10 @@ The tool updates itself when a newer release is out.
 - **Auto-FTP** sends everything by itself as soon as it is converted or downloaded.
 - **Send to** picks where maps and mods go: the console's own storage, a USB drive or extended storage.
 
+## Saves
+
+Mods and maps that save (stats, settings) keep their files in `/data/BO3-Customs/saves/<mod or map>/`.
+
 ## USB and extended storage
 
 Maps and mods can also sit on a USB drive or extended storage, in a `BO3-Customs` folder at the root of the drive
@@ -47,8 +48,14 @@ Maps and mods can also sit on a USB drive or extended storage, in a `BO3-Customs
 
 ## LAN games
 
-When you join a LAN game and do not have the host's map or mods, the SPRX downloads them from the host and then loads you in.
-Both consoles need this SPRX and must be on the same network. Circle cancels the download; the next join carries on from there.
+Everyone needs this SPRX.
+
+- **Downloads**: missing the host's map or mods? They download, then you load in. Works on one network or between homes
+  over any System Link tunnel. Circle cancels; the next join resumes.
+- **Missing maps**: players without the map get a "MISSING MAP", "MISSING DLC" or "DOWNLOADING" card, and the host's
+  map list shows how many are missing each map. Starting while someone is downloading asks first.
+- **Player menu**: select a player to promote to host, kick, ban or mute. Promoting switches to Shadows of Evil first
+  if anyone is missing the map.
 
 ## Found a problem?
 
@@ -58,10 +65,17 @@ Grab it before you start the game again: every launch starts a new log.
 Also attach the tool's log for the map that causes the issue: press **Log** in the tool, then **Save**.
 If the tool was closed since, its logs are in `work\analysis\gui_logs` beside the tool.
 
-## Console Layout
+## Console layout
+
+<details>
+<summary>Every file BO3-Customs uses on the console</summary>
+
 ```text
 /data/BO3-Customs/
 ├── BO3-Customs.sprx
+├── config.cfg
+├── log.txt
+├── active_mod.txt
 ├── ui_scripts/
 │   ├── graphics.lua
 │   ├── kbm_strings.lua
@@ -71,33 +85,90 @@ If the tool was closed since, its logs are in `work\analysis\gui_logs` beside th
 │   ├── mouse.lua
 │   └── restart.lua
 ├── lui/
+│   ├── lua/
+│   │   └── lobby/
+│   │       └── lobbysteam.lua
 │   └── ui/
+│       ├── t6/
+│       │   └── menus/
+│       │       └── keyboardtextfield.lua
 │       ├── t7/
 │       │   └── utility/
-│       │       └── pcutility.lua
+│       │       ├── modsutility.lua
+│       │       ├── pcutility.lua
+│       │       └── starterpackutility.lua
 │       └── uieditor/
 │           ├── menus/
-│           │   └── mods/
-│           │       └── menumodsload.lua
+│           │   ├── lobby/
+│           │   │   └── common/
+│           │   │       └── lobbyserverbrowseronline.lua
+│           │   ├── mods/
+│           │   │   └── menumodsload.lua
+│           │   ├── pc/
+│           │   │   ├── keyboardinputoverlay.lua
+│           │   │   ├── serverbrowserfilters.lua
+│           │   │   └── serversettings.lua
+│           │   └── core_patch_pc_require.lua
 │           └── widgets/
-│               └── mods/
-│                   ├── entrymodsload.lua
-│                   └── widgetmodsload.lua
+│               ├── charactercustomization/
+│               │   ├── tauntbindswidget.lua
+│               │   └── tauntwidget.lua
+│               ├── hud/
+│               │   └── console/
+│               │       ├── console.lua
+│               │       ├── consoleentry.lua
+│               │       ├── consoleentrycontainer.lua
+│               │       ├── consoleicon.lua
+│               │       └── consoletext.lua
+│               ├── lobby/
+│               │   ├── common/
+│               │   │   └── splitscreenlobbybuttonpc.lua
+│               │   └── lists/
+│               │       └── lobbymembermp45.lua
+│               ├── mods/
+│               │   ├── entrymodsload.lua
+│               │   └── widgetmodsload.lua
+│               ├── pc/
+│               │   ├── choosecharacter/
+│               │   │   └── choosecharacter_cardclickbutton.lua
+│               │   ├── craft/
+│               │   │   ├── craftemblemeditmouseinstructions.lua
+│               │   │   └── craftsideselectorbutton.lua
+│               │   ├── serverbrowser/
+│               │   │   ├── serverbrowserbutton.lua
+│               │   │   ├── serverbrowsercheckbox.lua
+│               │   │   ├── serverbrowserdetails.lua
+│               │   │   ├── serverbrowserflag.lua
+│               │   │   ├── serverbrowserheader.lua
+│               │   │   ├── serverbrowserheadericoncolumn.lua
+│               │   │   ├── serverbrowserheadernamedcolumn.lua
+│               │   │   ├── serverbrowserplayerrow.lua
+│               │   │   ├── serverbrowserrow.lua
+│               │   │   └── serverbrowserrowinternal.lua
+│               │   └── utility/
+│               │       ├── inputtextfield.lua
+│               │       ├── starterpackwatermark.lua
+│               │       └── textinputwidget.lua
+│               └── horizontalscrollingtextbox_14pt.lua
 ├── zone/
+│   ├── snd/
+│   │   ├── all/
+│   │   │   ├── zm_levelcommon.all.sabl
+│   │   │   └── zm_levelcommon.all.sabs
+│   │   └── en/
+│   │       ├── zm_levelcommon.en.sabl
+│   │       └── zm_levelcommon.en.sabs
 │   ├── en_zm_levelcommon.ff
 │   ├── en_zm_levelcommon.xpak
 │   ├── zm_levelcommon.ff
-│   ├── zm_levelcommon.xpak
-│   └── snd/
-│       ├── all/
-│       │   ├── zm_levelcommon.all.sabl
-│       │   └── zm_levelcommon.all.sabs
-│       └── <lang>/
-│           ├── zm_levelcommon.<lang>.sabl
-│           └── zm_levelcommon.<lang>.sabs
+│   └── zm_levelcommon.xpak
+├── saves/
+│   └── <mod or map>/
+│       └── ...                    files a mod or map saves, like its stats and settings
 ├── mods/
 │   └── <mod>/
 │       ├── workshop.json
+│       ├── previewimage.png
 │       ├── core_mod.ff
 │       ├── zm_mod.ff
 │       └── ...
@@ -118,17 +189,21 @@ If the tool was closed since, its logs are in `work\analysis\gui_logs` beside th
             └── <name>.mkv
 ```
 
+Maps and mods on a USB drive or extended storage use the same `usermaps/` and `mods/` layout in a `BO3-Customs` folder at the root of the drive.
+
+</details>
+
 ## Building
 
 - **The SPRX**: VS 2022, PS4 SDK 12.00, .NET 10.0 SDK and Python 3.
 - **The tool**: .NET 10.0 SDK.
 
 ```text
-cd Tool
+cd Tool/Porter
 dotnet publish src/FFPorter.Desktop.T7/FFPorter.Desktop.T7.csproj -p:PublishProfile=FolderProfile
 ```
 
-The single exe lands in `Tool/publish/`.
+The single exe lands in `Tool/Porter/publish/`.
 
 ## Credits
 
@@ -138,10 +213,3 @@ The single exe lands in `Tool/publish/`.
 ## License
 
 GPL-3.0-or-later — see [LICENSE](LICENSE).
-
-Copyright (C) 2026 ItsJokerZz
-
-This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
