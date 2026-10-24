@@ -9,6 +9,10 @@
 
 #define DETOUR_MAP_SIZE 0x1000
 
+// Track only installed detours; failed attachments must not poison future retries.
+static uint64_t g_hooked[96]{};
+static size_t g_hookedCount = 0;
+
 typedef struct _GHSDK_DetourReloc
 {
     size_t Offset;
@@ -268,21 +272,14 @@ void* Detour_Attach(Detour* This, uint64_t FunctionPtr, void* HookPtr, void** Ou
         return This->StubPtr;
     }
 
+    for (size_t i = 0; i < g_hookedCount; ++i)
     {
-        static uint64_t hooked[96];
-        static int hookedCount = 0;
-
-        for (int i = 0; i < hookedCount; ++i)
-        {
-            if (hooked[i] != FunctionPtr)
-                continue;
-
+        if (g_hooked[i] == FunctionPtr)
             return 0;
-        }
-
-        if (hookedCount < (int)(sizeof(hooked) / sizeof(hooked[0])))
-            hooked[hookedCount++] = FunctionPtr;
     }
+
+    if (g_hookedCount >= sizeof(g_hooked) / sizeof(g_hooked[0]))
+        return 0;
 
     memset(This, 0, sizeof(*This));
 
@@ -396,6 +393,7 @@ void* Detour_Attach(Detour* This, uint64_t FunctionPtr, void* HookPtr, void** Ou
     This->MapSize = DETOUR_MAP_SIZE;
     This->PatchSize = PatchSize;
     This->Installed = true;
+    g_hooked[g_hookedCount++] = FunctionPtr;
 
     return Stub;
 }
@@ -410,6 +408,15 @@ void Detour_Detach(Detour* This)
     sceKernelUsleep(20000);
 
     sceKernelMunmap(This->MapPtr, This->MapSize);
+
+    for (size_t i = 0; i < g_hookedCount; ++i)
+    {
+        if (g_hooked[i] == (uint64_t)This->FunctionPtr)
+        {
+            g_hooked[i] = g_hooked[--g_hookedCount];
+            break;
+        }
+    }
 
     memset(This, 0, sizeof(*This));
 }
