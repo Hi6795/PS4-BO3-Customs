@@ -151,8 +151,19 @@ static int Start()
 
     ScePthread thread;
 
-    scePthreadCreate(&thread, nullptr, start_thread, nullptr, "BO3-Customs Init");
-    scePthreadJoin(thread, nullptr);
+    const int createResult = scePthreadCreate(&thread, nullptr, start_thread, nullptr, "BO3-Customs Init");
+    if (createResult != 0)
+    {
+        g_started.store(false);
+        return createResult;
+    }
+
+    const int joinResult = scePthreadJoin(thread, nullptr);
+    if (joinResult != 0)
+    {
+        g_started.store(false);
+        return joinResult;
+    }
 
     return 0;
 }
