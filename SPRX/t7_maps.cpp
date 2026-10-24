@@ -1797,7 +1797,16 @@ static void GrowPool(int32_t type)
         return;
     }
 
-    const size_t bytes = ((size_t)growth->size * step + 0x3FFF) & ~(size_t)0x3FFF;
+    // Never exceed the per-pool growth budget, even on the final allocation.
+    const uint32_t remaining = most - growth->grown;
+    const uint32_t add = step < remaining ? step : remaining;
+    if (!add || (size_t)add > (SIZE_MAX - 0x3FFFu) / growth->size)
+    {
+        T7Log_Write("[Pools] invalid growth size for %s", growth->name);
+        return;
+    }
+
+    const size_t bytes = ((size_t)growth->size * add + 0x3FFFu) & ~(size_t)0x3FFFu;
     void* block = nullptr;
 
     if (sceKernelMmap(0, bytes, 1 | 2, 0x1000 | 0x2, -1, 0, &block) < 0 || !block)
@@ -1806,17 +1815,17 @@ static void GrowPool(int32_t type)
         return;
     }
 
-    for (uint32_t i = 0; i < step; ++i)
+    for (uint32_t i = 0; i < add; ++i)
     {
         const uintptr_t entry = (uintptr_t)block + (uintptr_t)growth->size * i;
-        *(uintptr_t*)entry = i + 1 < step ? entry + growth->size : 0;
+        *(uintptr_t*)entry = i + 1 < add ? entry + growth->size : 0;
     }
 
-    T7Log_Write("[Pools] the %s pool was full at %u; room for %u more was added", growth->name, pool->limit, step);
+    T7Log_Write("[Pools] the %s pool was full at %u; room for %u more was added", growth->name, pool->limit, add);
 
     pool->free = (uintptr_t)block;
-    pool->limit += step;
-    growth->grown += step;
+    pool->limit += add;
+    growth->grown += add;
 }
 
 static uint64_t LinkXAsset_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
