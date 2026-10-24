@@ -25,7 +25,10 @@ public sealed class T7TechsetConverter : IT7AssetConverter
             else if (!TryReference(context, rewrite, rewrite.Reads.Count))
             {
                 if (context.ShaderCompiler == null)
+                {
+                    reason = $"{rewrite.Label}: no matching PS4 donor technique set and no shader compiler is configured";
                     return false;
+                }
                 T7TechsetBuilder.Convert(context, rewrite);
             }
             rewrite.Finish();
