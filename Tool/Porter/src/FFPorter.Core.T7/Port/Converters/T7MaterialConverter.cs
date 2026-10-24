@@ -260,7 +260,7 @@ public sealed class T7MaterialConverter : IT7AssetConverter, IT7NestedConverter
 
     private static ReadOnlySpan<byte> Slice(byte[] data, int start, int size)
     {
-        if (start >= data.Length || size <= 0)
+        if (start < 0 || size <= 0 || start >= data.Length)
             return [];
         return data.AsSpan(start, Math.Min(size, data.Length - start));
     }
