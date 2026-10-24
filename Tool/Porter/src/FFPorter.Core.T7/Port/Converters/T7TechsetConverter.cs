@@ -60,6 +60,9 @@ public sealed class T7TechsetConverter : IT7AssetConverter
         if (context.GameTechsets.Count == 0 || !CanReference(rewrite.Pc.Zone, header) || !rewrite.HasAhead(1) || rewrite.Peek(1).Kind != T7WalkKind.String)
             return false;
         string name = Encoding.Latin1.GetString(rewrite.Bytes(rewrite.Peek(1))[..^1]);
+        // Never emit a game-reference marker for an unavailable donor techset.
+        // A missing reference must fall through to shader compilation or fail
+        // conversion, rather than producing a fastfile with a dangling reference.
         if (!context.GameTechsets.Contains(name))
             return false;
         ConvertToReference(context, rewrite, endRead ?? EndOfEmbedded(rewrite, header));
