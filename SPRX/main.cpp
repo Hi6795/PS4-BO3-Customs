@@ -61,7 +61,14 @@ static void* start_thread(void*)
    const char* rand = sceKernelGetFsSandboxRandomWord();
 
    char path[256 * 2];
-   snprintf(path, sizeof(path), "/%s/common/lib/libSceNotification.sprx", rand);
+   if (rand == nullptr || rand[0] == '\0')
+   {
+       T7Log_Write("[Init] Missing filesystem sandbox identifier");
+       return nullptr;
+   }
+   int pathLen = snprintf(path, sizeof(path), "/%s/common/lib/libSceNotification.sprx", rand);
+   if (pathLen < 0 || static_cast<size_t>(pathLen) >= sizeof(path))
+       return nullptr;
 
    bool is_ps5 = false;
    int fd = sceKernelOpen(path, SCE_KERNEL_O_RDONLY, 0);
