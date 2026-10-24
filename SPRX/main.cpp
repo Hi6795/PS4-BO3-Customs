@@ -99,6 +99,14 @@ static void* start_thread(void*)
        }
    }
 
+    // Reject unsupported BO3 builds before any subsystem installs detours.
+    if (!RangeReadable(base + kComFrame, sizeof(k_comFrame)) ||
+        memcmp((const void*)(base + kComFrame), k_comFrame, sizeof(k_comFrame)) != 0)
+    {
+        Notify("BO3 Customs: unsupported frame signature; no hooks installed");
+        return nullptr;
+    }
+
     T7Log_Install(base);
     T7Maps_Install(base);
     T7MapImages_Install(base);
@@ -110,14 +118,6 @@ static void* start_thread(void*)
         T7Share_Install(base);
 
     T7Log_Write("[Maps] %d custom map(s) found", T7Maps_MapCount());
-
-    if (!RangeReadable(base + kComFrame, sizeof(k_comFrame)) ||
-        memcmp((const void*)(base + kComFrame), k_comFrame, sizeof(k_comFrame)) != 0)
-    {
-        T7Log_Write("[Init] Unsupported Com_Frame signature; frame hook not installed");
-        Notify("BO3 Customs: unsupported frame signature; runtime features disabled");
-        return nullptr;
-    }
 
     Detour_Attach(&g_frameDetour, (uint64_t)(base + kComFrame), (void*)Frame_h, &g_frameOriginal);
     if (!g_frameOriginal)
