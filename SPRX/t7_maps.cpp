@@ -1373,6 +1373,9 @@ static uint64_t FileOpen_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, u
                            double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
 {
     const char* const path = (const char*)a1;
+    // A refresh may rewrite the shared registry as soon as ListReader exits.
+    // Keep the redirected name private until the original file-open returns.
+    char redirected[sizeof(File::path)] = {};
 
     if (path)
     {
@@ -1381,15 +1384,11 @@ static uint64_t FileOpen_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, u
         if (rel)
         {
             ListReader reading;
-            int found = -1;
-            const File* const mod = StackFile(rel);
+            const File* match = StackFile(rel);
 
-            if (mod)
+            if (!match)
             {
-                a1 = (uint64_t)mod->path;
-            }
-            else
-            {
+                int found = -1;
                 for (int i = 0; i < g_fileCount; ++i)
                 {
                     if (strcmp(g_files[i].rel, rel) == 0)
@@ -1403,9 +1402,13 @@ static uint64_t FileOpen_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, u
                     found = LanguageCompanion(rel);
 
                 if (found >= 0)
-                {
-                    a1 = (uint64_t)g_files[found].path;
-                }
+                    match = &g_files[found];
+            }
+
+            if (match)
+            {
+                snprintf(redirected, sizeof(redirected), "%s", match->path);
+                a1 = (uint64_t)redirected;
             }
         }
     }
