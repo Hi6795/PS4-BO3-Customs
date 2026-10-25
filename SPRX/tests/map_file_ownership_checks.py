@@ -41,10 +41,10 @@ cases = [
     ("zm_alpha.ff", "zm_beta", False),
     ("zm_alpha_patch.ff", "zm_alpha_patch", True),
 ]
-code = '#include <cstring>\\n#include <cstdio>\\n' + helper + '\\nint main() {\\n'
+code = '#include <cstring>\n#include <cstdio>\n' + helper + '\nint main() {\n'
 for index, (filename, package, expected) in enumerate(cases):
-    code += f' if (ZoneFileMatchesPackage("{filename}", "{package}") != {str(expected).lower()}) return {index + 1};\\n'
-code += ' std::puts("PASS: 12 production map ownership cases"); return 0;\\n}\\n'
+    code += f' if (ZoneFileMatchesPackage("{filename}", "{package}") != {str(expected).lower()}) return {index + 1};\n'
+code += ' std::puts("PASS: 12 production map ownership cases"); return 0;\n}\n'
 with tempfile.TemporaryDirectory() as directory:
     cpp = Path(directory) / "test.cpp"
     exe = Path(directory) / "test"
