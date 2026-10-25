@@ -5873,11 +5873,15 @@ static int RemoveTree(const char* path, int depth)
     size_t capacity = 0x10000;
     size_t length = 0;
     char* listing = (char*)malloc(capacity);
+    bool complete = false;
 
     while (listing)
     {
         if (capacity - length < 0x10000)
         {
+            if (capacity > SIZE_MAX / 2)
+                break;
+
             char* const grown = (char*)realloc(listing, capacity * 2);
 
             if (!grown)
@@ -5889,7 +5893,13 @@ static int RemoveTree(const char* path, int depth)
 
         const int n = sceKernelGetdents(fd, listing + length, 0x10000);
 
-        if (n <= 0)
+        if (n == 0)
+        {
+            complete = true;
+            break;
+        }
+
+        if (n < 0)
             break;
 
         length += (size_t)n;
@@ -5897,32 +5907,69 @@ static int RemoveTree(const char* path, int depth)
 
     sceKernelClose(fd);
 
-    if (!listing)
+    if (!listing || !complete)
+    {
+        free(listing);
         return 1;
+    }
+
+    // Validate the complete listing before deleting anything. Malformed or
+    // truncated kernel records must never become filesystem paths.
+    constexpr size_t headerBytes = offsetof(SceKernelDirent, d_name);
+
+    for (size_t at = 0; at < length;)
+    {
+        if (length - at < headerBytes)
+        {
+            free(listing);
+            return 1;
+        }
+
+        SceKernelDirent header{};
+        memcpy(&header, listing + at, headerBytes);
+        const size_t recordLength = header.d_reclen;
+
+        if (recordLength <= headerBytes || recordLength > length - at)
+        {
+            free(listing);
+            return 1;
+        }
+
+        const char* const name = listing + at + headerBytes;
+        const size_t available = recordLength - headerBytes < sizeof(header.d_name)
+            ? recordLength - headerBytes : sizeof(header.d_name);
+        const char* const end = (const char*)memchr(name, 0, available);
+
+        if (!end || memchr(name, '/', (size_t)(end - name)))
+        {
+            free(listing);
+            return 1;
+        }
+
+        at += recordLength;
+    }
 
     int failures = 0;
 
-    for (size_t at = 0; at + 8 <= length;)
+    for (size_t at = 0; at < length;)
     {
-        const SceKernelDirent* const entry = (const SceKernelDirent*)(listing + at);
+        SceKernelDirent header{};
+        memcpy(&header, listing + at, headerBytes);
+        const char* const name = listing + at + headerBytes;
+        at += header.d_reclen;
 
-        if (entry->d_reclen == 0)
-            break;
-
-        at += entry->d_reclen;
-
-        if (entry->d_fileno == 0 || strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+        if (header.d_fileno == 0 || strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
             continue;
 
         char child[512];
 
-        if (snprintf(child, sizeof(child), "%s/%s", path, entry->d_name) >= (int)sizeof(child))
+        if (snprintf(child, sizeof(child), "%s/%s", path, name) >= (int)sizeof(child))
         {
             ++failures;
             continue;
         }
 
-        if (entry->d_type == SCE_KERNEL_DT_DIR)
+        if (header.d_type == SCE_KERNEL_DT_DIR)
             failures += RemoveTree(child, depth + 1);
         else if (sceKernelUnlink(child) < 0)
             failures += RemoveTree(child, depth + 1);
@@ -5935,7 +5982,6 @@ static int RemoveTree(const char* path, int depth)
 
     return failures;
 }
-
 static void* UninstallThread(void*)
 {
     const int failures = RemoveTree(g_uninstallRoot, 0);
