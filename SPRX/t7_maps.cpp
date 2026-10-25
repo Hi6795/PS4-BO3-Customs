@@ -5607,13 +5607,39 @@ static void BuildModsLua()
            "if ui ~= nil and ui.DataChanged ~= nil then pcall(ui.DataChanged) end\n");
 }
 
+// Refresh rebuilds this source under BeginListWrite. Copy it while protected,
+// then release the reader before running Lua: callbacks may themselves acquire
+// ListReader, so holding it through T7Lua_RunOnTop could deadlock a refresh.
+static char* SnapshotMapsTableLua()
+{
+    ListReader reading;
+    if (!g_mapsTableLua[0])
+        return nullptr;
+
+    const size_t length = strnlen(g_mapsTableLua, sizeof(g_mapsTableLua));
+    if (length == sizeof(g_mapsTableLua))
+        return nullptr;
+
+    char* const copy = (char*)malloc(length + 1);
+    if (copy)
+        memcpy(copy, g_mapsTableLua, length + 1);
+    return copy;
+}
+
 static uint64_t MapsTable_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
                             double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
 {
     const uint64_t results = ((Hook_t)g_mapsTableOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
 
-    if ((uint32_t)results == 1 && a1 && g_mapsTableLua[0])
-        T7Lua_RunOnTop(a1, g_mapsTableLua, "=bo3customs_maptable");
+    if ((uint32_t)results == 1 && a1)
+    {
+        char* const source = SnapshotMapsTableLua();
+        if (source)
+        {
+            T7Lua_RunOnTop(a1, source, "=bo3customs_maptable");
+            free(source);
+        }
+    }
 
     return results;
 }
