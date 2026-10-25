@@ -66,3 +66,22 @@ implementation.
 This is an isolated host Lua 5.4 compatibility test, not BO3's HKS runtime or
 a PS4 game launch. It does not establish that Reaper Collection's map crashes,
 menu errors, or unrelated conversion problems are resolved.
+
+## Lua LUI native-probe host regression
+
+On Linux with Python 3 and the `liblua5.4` shared library installed:
+
+```sh
+python3 SPRX/tests/lua_native_probe_checks.py SPRX/t7_lua.cpp
+```
+
+This extracts the production `patchLui` function from embedded
+`k_lobbyParityLua` and checks retry after a throwing or nil-returning LUI
+constructor, class recreation, constructor replacement, and idempotency.
+Previously, `nativeDone[class]` was set before a successful probe and keyed
+only by class name, permanently suppressing these retries.
+
+The isolated original fixture fails the retry assertion; the patched fixture
+passes. These host Lua 5.4 checks do **not** validate BO3 HKS, the complete
+SPRX build, any console firmware, or the unresolved controller-settings
+UI Error 9756. Console.zip and Tool/Porter are unchanged by this fix.
