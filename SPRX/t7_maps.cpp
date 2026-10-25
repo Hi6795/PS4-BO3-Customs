@@ -786,6 +786,21 @@ static bool IsZoneFile(const char* name)
            EndsWith(name, ".sabs");
 }
 
+// A map zone may have a language prefix or a companion suffix, but another
+// map's longer name must not claim it (e.g. zm_alpha vs zm_alpha2).
+static bool ZoneFileMatchesPackage(const char* file, const char* name)
+{
+    const size_t length = strlen(name);
+    for (const char* at = strstr(file, name); at; at = strstr(at + 1, name))
+    {
+        const char before = at == file ? '\0' : at[-1];
+        const char after = at[length];
+        if ((before == '\0' || before == '_') && (after == '\0' || after == '_' || after == '.'))
+            return true;
+    }
+    return false;
+}
+
 static int ListFolder(const char* folder, bool folders, char names[][kListedNameMax], int capacity)
 {
     const int fd = sceKernelOpen(folder, SCE_KERNEL_O_RDONLY | SCE_KERNEL_O_DIRECTORY, 0);
@@ -874,7 +889,7 @@ static void ScanPackage(const char* folder, int package)
 
     for (int i = 0; i < fileCount; ++i)
     {
-        if (IsZoneFile(files[i]) && strstr(files[i], name))
+        if (IsZoneFile(files[i]) && ZoneFileMatchesPackage(files[i], name))
             AddFile(files[i], folder, package);
     }
 
@@ -892,7 +907,7 @@ static void ScanPackage(const char* folder, int package)
 
         for (int i = 0; i < bankCount; ++i)
         {
-            if (IsZoneFile(files[i]) && strstr(files[i], name))
+            if (IsZoneFile(files[i]) && ZoneFileMatchesPackage(files[i], name))
             {
                 char rel[128];
                 snprintf(rel, sizeof(rel), "snd/%s/%s", languages[l], files[i]);
