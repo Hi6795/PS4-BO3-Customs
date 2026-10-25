@@ -883,10 +883,23 @@ pcall(Lobby.tick)
 )LUA";
 
 static const char k_tickLua[] =
-    "local tick = rawget(_G, 'BO3CustomsTick')\n"
-    "if tick ~= nil then tick() end\n"
-    "local lobby = rawget(_G, 'BO3CustomsLobbyMaps')\n"
-    "if lobby ~= nil and lobby.tick ~= nil then pcall(lobby.tick) end\n";
+    "local G = _G\n"
+    "local tick = rawget(G, 'BO3CustomsTick')\n"
+    "if tick == nil then rawset(G, 'BO3CustomsTickErrorLogged', nil) end\n"
+    "if tick ~= nil then\n"
+    "  local ok, err = pcall(tick)\n"
+    "  if ok then\n"
+    "    rawset(G, 'BO3CustomsTickErrorLogged', nil)\n"
+    "  elseif not rawget(G, 'BO3CustomsTickErrorLogged') then\n"
+    "    rawset(G, 'BO3CustomsTickErrorLogged', true)\n"
+    "    local tabs = rawget(G, 'BO3CustomsMapTabs')\n"
+    "    if type(tabs) == 'table' and type(tabs.logs) == 'table' then\n"
+    "      tabs.logs[#tabs.logs + 1] = 'menu tick failed: ' .. tostring(err)\n"
+    "    end\n"
+    "  end\n"
+    "end\n"
+    "local lobby = rawget(G, 'BO3CustomsLobbyMaps')\n"
+    "if type(lobby) == 'table' and lobby.tick ~= nil then pcall(lobby.tick) end\n";
 
 static const char k_lobbyTickLua[] =
     "local lobby = rawget(_G, 'BO3CustomsLobbyMaps')\n"
