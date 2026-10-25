@@ -172,7 +172,7 @@ constexpr uint32_t kUsermapScriptPriority = 1200;
 constexpr int    kMaxPackages   = 128;
 constexpr int    kMaxFiles      = 1536;
 constexpr int    kMaxZoneCall   = 32;
-constexpr int    kMaxListed     = 96;
+constexpr int    kMaxListed     = 512;
 constexpr size_t kNameMax       = 56;
 constexpr size_t kQueryMax      = 200;
 constexpr size_t kListedNameMax = 96;
@@ -794,6 +794,7 @@ static int ListFolder(const char* folder, bool folders, char names[][kListedName
 
     static char buffer[0x10000];
     int count = 0;
+    bool overflow = false;
 
     for (;;)
     {
@@ -819,10 +820,16 @@ static int ListFolder(const char* folder, bool folders, char names[][kListedName
 
             if (count < capacity)
                 snprintf(names[count++], kListedNameMax, "%s", entry->d_name);
+            else
+                overflow = true;
         }
     }
 
     sceKernelClose(fd);
+
+    if (overflow)
+        T7Log_Write("[Maps] %s has more than %d entries; remaining entries were not indexed", folder, capacity);
+
     return count;
 }
 
