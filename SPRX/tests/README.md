@@ -29,3 +29,20 @@ compatibility. The source fix is not a verified resolution of the reported
 BO1 Multiplayer image-pool exhaustion or UI/Lua errors. Test the eventual
 console candidate on BO3 1.33, including ordinary loading, refused hook writes,
 cleanup and retry, before treating it as console validated.
+
+## Lua menu tick host regression
+
+On Linux with Python 3 and the `liblua5.4` shared library installed:
+
+```sh
+python3 SPRX/tests/lua_tick_checks.py SPRX/t7_lua.cpp
+```
+
+This extracts the **actual embedded `k_tickLua` C++ string** and executes it in
+host Lua 5.4. The test verifies that a failing `BO3CustomsTick` does not prevent
+the lobby tick from running, that repeated failures are logged once, that a
+successful tick re-arms diagnostics, and that missing callbacks/log sinks are
+handled. The original unguarded tick fails the test with the intentional Lua
+error. This check does not execute BO3's HKS VM, load any game mod, or validate
+the PS4 SPRX. In particular it does not prove that a mod's gameplay scripts
+(such as Offline & Unlimited Gobblegum) function correctly.
