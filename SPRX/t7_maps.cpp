@@ -1563,6 +1563,37 @@ static void ResetScriptClaims()
     g_scriptClaimCount = 0;
 }
 
+static void PruneUnloadedModUiFiles()
+{
+    ClaimLock locked;
+    int kept = 0;
+
+    for (int i = 0; i < g_modUiFileCount; ++i)
+    {
+        bool loaded = false;
+
+        for (int j = 0; j < g_loadedCount && !loaded; ++j)
+            loaded = EqualsNoCase(g_modUiOwners[i], g_loaded[j]);
+
+        if (!loaded)
+            continue;
+
+        if (kept != i)
+        {
+            memcpy(g_modUiFiles[kept], g_modUiFiles[i], sizeof(g_modUiFiles[0]));
+            memcpy(g_modUiOwners[kept], g_modUiOwners[i], sizeof(g_modUiOwners[0]));
+        }
+
+        ++kept;
+    }
+
+    if (kept != g_modUiFileCount)
+    {
+        g_modUiFileCount = kept;
+        g_modsLuaDirty.store(true);
+    }
+}
+
 static int StackIndexOfZone(const char* zone)
 {
     int index = -1;
@@ -3492,6 +3523,7 @@ static void SetLoaded(int count)
     for (int i = 0; i < count && i < g_stackCount; ++i)
         snprintf(g_loaded[g_loadedCount++], kNameMax, "%s", g_stack[i].mod.name);
 
+    PruneUnloadedModUiFiles();
     g_modsLuaDirty.store(true);
 }
 
@@ -3550,6 +3582,7 @@ static int AddModZones(const ZoneInfo* zones, int count, ZoneInfo* out)
         }
 
         ResetScriptClaims();
+        PruneUnloadedModUiFiles();
 
         if (g_chosenCount > 0)
             T7Log_Write("[Mods] the chosen mods are not installed; %s loads without them", k_modeCommons[mode]);
@@ -3677,6 +3710,7 @@ static uint64_t LoadXAssets_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4
             T7Log_Write("[Mods] %d mod(s) unload with this zone change", g_loadedCount);
             g_loadedCount = 0;
             ResetScriptClaims();
+            PruneUnloadedModUiFiles();
             g_modsLuaDirty.store(true);
         }
     }
