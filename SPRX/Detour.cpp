@@ -1,4 +1,11 @@
-#include "headers.hpp"
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include <kernel.h>
+#include <sys/mman.h>
+
+#include "HDE64.h"
+#include "Detour.hpp"
 
 #define VM_PROT_ALL (PROT_READ | PROT_WRITE | PROT_EXEC)
 
@@ -246,7 +253,9 @@ static bool Detour_InRel32Range(uint64_t From, uint64_t To)
 
 static bool Detour_WriteVerified(void* Address, const uint8_t* Bytes, size_t Size)
 {
-    sceKernelMprotect(Address, Size, VM_PROT_ALL);
+    if (sceKernelMprotect(Address, Size, VM_PROT_ALL) < 0)
+        return false;
+
     memcpy(Address, Bytes, Size);
 
     if (memcmp(Address, Bytes, Size) != 0)
@@ -403,7 +412,9 @@ void Detour_Detach(Detour* This)
     if (!This || !This->Installed)
         return;
 
-    Detour_WriteVerified(This->FunctionPtr, This->Original, This->PatchSize);
+    // The active hook can still call its trampoline until restoration succeeds.
+    if (!Detour_WriteVerified(This->FunctionPtr, This->Original, This->PatchSize))
+        return;
 
     sceKernelUsleep(20000);
 
