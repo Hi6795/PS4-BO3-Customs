@@ -125,3 +125,19 @@ the list-reader guard during Lua compilation and execution.
 This closes a separately verified source-level race; it does not establish the
 cause of issue #43's 42-map threshold. No full SPRX build, HKS or PS4 hardware
 validation is implied. Console.zip, its Lua files, and Tool/Porter are unchanged.
+
+## Per-worker mod-load attribution regression
+
+The mod loader uses `ModLoadContexts` to keep `LoadXFile` zone attribution and
+plain-zone recursion guards isolated per engine thread. The host regression
+checks nested restoration, concurrent workers, and fail-closed slot exhaustion.
+
+```sh
+g++ -std=c++20 -Wall -Wextra -Wpedantic -Werror -O2 -pthread \
+  SPRX/tests/mod_load_context_tests.cpp -o /tmp/bo3_mod_load_context_tests
+/tmp/bo3_mod_load_context_tests
+```
+
+This regression checks the exact production header. It does not verify that
+two-mod crashes, GSC runtime state, or asset ownership work correctly on
+BO3 1.33 hardware. The related draft PR #1 remains unmerged into main.

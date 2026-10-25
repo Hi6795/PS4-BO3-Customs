@@ -2,6 +2,7 @@
 #include "t7_maps.hpp"
 #include "t7_mapimages.hpp"
 #include "t7_lua.hpp"
+#include "mod_load_context.hpp"
 
 #include <atomic>
 
@@ -306,8 +307,8 @@ static char                    g_loaded[kMaxStack][kNameMax];
 static int                     g_loadedCount = 0;
 static char                    g_sessionMods[kMaxStack][kNameMax];
 static int                     g_sessionModCount = -1;
-static std::atomic<uintptr_t>  g_loadingZone{0};
-static std::atomic<uint64_t>   g_plainZoneThread{0};
+static ModLoadContexts         g_loadingZones;
+static ModLoadContexts         g_plainZones;
 static std::atomic<bool>       g_applyWanted{false};
 static std::atomic<bool>       g_prefetchWanted{false};
 static bool                    g_reloadHeld = false;
@@ -332,7 +333,6 @@ static int                     g_modUiFileCount = 0;
 static char                    g_modNotice[224];
 static char                    g_waitZones[64][kNameMax];
 static int                     g_waitZoneCount = 0;
-static std::atomic<uint64_t>   g_loadingThread{0};
 static char                    g_xpakNames[kXpakNames][kNameMax + 8];
 static std::atomic<uint32_t>   g_xpakNameAt{0};
 static std::atomic<bool> g_modsLuaDirty{true};
@@ -1687,15 +1687,12 @@ static void NoteUiFile(uintptr_t header, int index)
 
 static void RenameStackAsset(uint64_t asset)
 {
-    if (g_loadingThread.load(std::memory_order_acquire) != (uint64_t)scePthreadSelf())
-        return;
-
     const int32_t type = *(const int32_t*)asset;
 
     if (type != kKeyValuePairs && type != kBgCache && type != kScriptParseTree && type != kRawFileAsset)
         return;
 
-    const char* const zone = (const char*)g_loadingZone.load(std::memory_order_acquire);
+    const char* const zone = (const char*)g_loadingZones.Current((uint64_t)scePthreadSelf());
 
     if (!zone || !RangeReadable((uintptr_t)zone, 1))
         return;
@@ -1898,12 +1895,9 @@ static uint64_t LoadXFile_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, 
                             uint64_t a8, double x0, double x1, double x2, double x3, double x4, double x5, double x6,
                             double x7)
 {
-    const uintptr_t zone = g_loadingZone.exchange((uintptr_t)a3, std::memory_order_acq_rel);
-    const uint64_t thread = g_loadingThread.exchange((uint64_t)scePthreadSelf(), std::memory_order_acq_rel);
+    ModLoadContexts::Scope loading(g_loadingZones, (uint64_t)scePthreadSelf(), (uintptr_t)a3);
     const uint64_t result = ((LoadXFile_t)g_loadXFileOriginal)(a1, a2, a3, a4, a5, a6, a7, a8, x0, x1, x2, x3, x4, x5,
                                                                x6, x7);
-    g_loadingThread.store(thread, std::memory_order_release);
-    g_loadingZone.store(zone, std::memory_order_release);
     return result;
 }
 
@@ -1928,12 +1922,11 @@ static uint64_t XPakOpen_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, u
                            double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
 {
     const char* const pak = (const char*)a1;
-    const char* const zone = (const char*)g_loadingZone.load(std::memory_order_acquire);
+    const char* const zone = (const char*)g_loadingZones.Current((uint64_t)scePthreadSelf());
     int index = -1;
     char inner[kNameMax];
 
-    if (pak && zone && g_loadingThread.load(std::memory_order_acquire) == (uint64_t)scePthreadSelf() &&
-        RangeReadable((uintptr_t)pak, 1) && StackName(zone, &index, inner, sizeof(inner)))
+    if (pak && zone && RangeReadable((uintptr_t)pak, 1) && StackName(zone, &index, inner, sizeof(inner)))
     {
         ListReader reading;
         char file[kNameMax + 8];
@@ -3608,7 +3601,7 @@ static uint64_t LoadXAssets_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4
     const uint64_t self = (uint64_t)scePthreadSelf();
 
     if (a1 && (int)(uint32_t)a2 > 0 && (int)(uint32_t)a2 <= kMaxZoneCall && (g_modCount > 0 || g_loadedCount > 0) &&
-        g_plainZoneThread.load(std::memory_order_acquire) != self)
+        g_plainZones.Current(self) == 0)
     {
         const bool replacing = g_loadedCount > 0 || AnyModZoneLoaded();
         const int added = g_modCount > 0 ? AddModZones((const ZoneInfo*)a1, (int)(uint32_t)a2, withMods) : 0;
@@ -3619,9 +3612,15 @@ static uint64_t LoadXAssets_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4
         if (added > 0 && replacing)
         {
             T7Log_Write("[Mods] the loaded mods unload with this zone change; the ticked mods load right after it");
-            g_plainZoneThread.store(self, std::memory_order_release);
-            const uint64_t result = LoadXAssets_h(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
-            g_plainZoneThread.store(0, std::memory_order_release);
+            uint64_t result;
+
+            {
+                ModLoadContexts::Scope plain(g_plainZones, self, 1);
+                result = plain.Valid()
+                    ? LoadXAssets_h(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7)
+                    : ((Hook_t)g_loadOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
+            }
+
             LoadXAssets_h((uint64_t)(withMods + (uint32_t)a2), (uint64_t)added, a3, a4, a5, a6, x0, x1, x2, x3, x4,
                           x5, x6, x7);
             return result;
