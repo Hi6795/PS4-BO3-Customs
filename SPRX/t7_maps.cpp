@@ -171,7 +171,7 @@ constexpr uint32_t kUsermapZoneFlags      = 0x100;
 constexpr uint32_t kUsermapScriptPriority = 1200;
 
 constexpr int    kMaxPackages   = 128;
-constexpr int    kMaxFiles      = 1536;
+constexpr int    kMaxFiles      = 4096;
 constexpr int    kMaxZoneCall   = 32;
 constexpr int    kMaxListed     = 512;
 constexpr size_t kNameMax       = 56;
@@ -271,6 +271,7 @@ static Package   g_packages[kMaxPackages];
 static int       g_packageCount = 0;
 static File      g_files[kMaxFiles];
 static int       g_fileCount = 0;
+static int       g_fileOverflow = 0;
 static Movie     g_movies[64];
 static int       g_movieCount = 0;
 static int       g_levelCommon = -1;
@@ -871,7 +872,10 @@ static void AddFile(const char* rel, const char* folder, int package)
     }
 
     if (g_fileCount >= kMaxFiles)
+    {
+        ++g_fileOverflow;
         return;
+    }
 
     File& file = g_files[g_fileCount++];
     snprintf(file.rel, sizeof(file.rel), "%s", rel);
@@ -5847,6 +5851,7 @@ static void ScanAll()
 {
     g_packageCount = 0;
     g_fileCount = 0;
+    g_fileOverflow = 0;
     g_movieCount = 0;
     g_levelCommon = -1;
     g_listedMaps = 0;
@@ -5864,6 +5869,10 @@ static void ScanAll()
         ScanSharedZones(data);
         ScanMods(data);
     }
+
+    if (g_fileOverflow)
+        T7Log_Write("[Maps] file registry full: %d of %d file entries ignored; map loading may fail",
+                    g_fileOverflow, kMaxFiles);
 
     g_modsLuaDirty.store(true);
 

@@ -141,3 +141,16 @@ g++ -std=c++20 -Wall -Wextra -Wpedantic -Werror -O2 -pthread \
 This regression checks the exact production header. It does not verify that
 two-mod crashes, GSC runtime state, or asset ownership work correctly on
 BO3 1.33 hardware. The related draft PR #1 remains unmerged into main.
+
+## Map-file registry capacity regression
+
+Run `python3 SPRX/tests/map_registry_capacity_checks.py SPRX/t7_maps.cpp` on an x86-64
+Linux host with Python 3 and GCC or Clang. This extracts the production
+`AddFile` function, checks that more than 1,536 distinct files can be
+registered without truncation, checks duplicate handling, and verifies
+capacity exhaustion is counted. The source check also requires a per-scan
+counter reset and a single diagnostic for overflow. The original 1,536-file
+registry cannot pass the 1,601-file case. This is an SPRX-owned file index,
+not a change to BO3 engine zone slots or memory pools. Host checks do not
+establish that issue #43's 42-map launch failure is resolved; that requires
+complete runtime logs and PS4 BO3 1.33 hardware validation.
