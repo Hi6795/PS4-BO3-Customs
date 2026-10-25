@@ -46,3 +46,23 @@ handled. The original unguarded tick fails the test with the intentional Lua
 error. This check does not execute BO3's HKS VM, load any game mod, or validate
 the PS4 SPRX. In particular it does not prove that a mod's gameplay scripts
 (such as Offline & Unlimited Gobblegum) function correctly.
+
+## Lua lobby map-wrapper host regression
+
+On Linux with Python 3 and the `liblua5.4` shared library installed:
+
+```sh
+python3 SPRX/tests/lua_lobby_map_checks.py SPRX/t7_lua.cpp
+```
+
+This extracts the embedded `k_lobbyParityLua` string and exercises the
+`GameLobbySetMap` and `IsMapValid` wrappers. It covers Engine methods
+registered after the first `require`, numeric UGC map IDs, ordinary map
+passthrough, repeated module loads, replaced methods, and recreated Engine
+tables. The previous one-shot `watched.maps` flag prevented late or replaced
+methods from receiving the wrappers. The host regression fails against that
+implementation.
+
+This is an isolated host Lua 5.4 compatibility test, not BO3's HKS runtime or
+a PS4 game launch. It does not establish that Reaper Collection's map crashes,
+menu errors, or unrelated conversion problems are resolved.
