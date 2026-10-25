@@ -85,3 +85,24 @@ The isolated original fixture fails the retry assertion; the patched fixture
 passes. These host Lua 5.4 checks do **not** validate BO3 HKS, the complete
 SPRX build, any console firmware, or the unresolved controller-settings
 UI Error 9756. Console.zip and Tool/Porter are unchanged by this fix.
+
+## Map-table Lua snapshot host regression
+
+On Linux with Python 3 and a C++20 compiler:
+
+```sh
+python3 SPRX/tests/map_table_snapshot_checks.py SPRX/t7_maps.cpp
+```
+
+The runner extracts the production `ListReader`, writer barrier, and
+`SnapshotMapsTableLua` helper from `t7_maps.cpp`, compiles them into a host
+fixture, and runs two readers against 16,000 map-list rewrites. It also checks
+empty and unterminated buffers, verifies that the map-table hook executes Lua
+using the copied source, and ensures the reader lock is released before any
+Lua callback can reenter the map-list APIs. Previously `MapsTable_h` passed a
+shared buffer directly to Lua while `T7Maps_Refresh` could rewrite it.
+
+This validates only source-level snapshot consistency and host concurrency.
+It does **not** prove issue #43's 42-map launch error is fixed, run BO3 HKS,
+compile the full SPRX, or test PS4 BO3 1.33. The issue's two attached runtime
+logs were inaccessible when this change was prepared.
