@@ -17,6 +17,7 @@ prefix = r'''
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <cstddef>
 #include <cstdarg>
 constexpr int SCE_KERNEL_O_RDONLY = 0;
 constexpr int SCE_KERNEL_O_DIRECTORY = 0;
@@ -28,12 +29,26 @@ struct SceKernelDirent {
     uint8_t d_type;
     char d_name[96];
 };
-static int total = 0, nextEntry = 0, warnings = 0;
+static int total = 0, nextEntry = 0, warnings = 0, malformed = 0;
 static int sceKernelOpen(const char*, int, int) { nextEntry = 0; return 1; }
 static int sceKernelClose(int) { return 0; }
 static int sceKernelGetdents(int, char* dst, size_t cap) {
     int used = 0;
     while (nextEntry < total && used + (int)sizeof(SceKernelDirent) <= (int)cap) {
+        if (malformed && nextEntry == 1) {
+            SceKernelDirent bad{};
+            bad.d_fileno = 2;
+            bad.d_type = SCE_KERNEL_DT_DIR;
+            const size_t header = offsetof(SceKernelDirent, d_name);
+            size_t emitted;
+            if (malformed == 1) { bad.d_reclen = 0; emitted = header; }
+            else if (malformed == 2) { bad.d_reclen = 65535; emitted = sizeof(bad); }
+            else { bad.d_reclen = (uint16_t)(header + 2); memcpy(bad.d_name, "xy", 2); emitted = bad.d_reclen; }
+            memcpy(dst + used, &bad, emitted);
+            used += (int)emitted;
+            ++nextEntry;
+            break;
+        }
         SceKernelDirent item{};
         item.d_fileno = (uint32_t)(nextEntry + 1);
         item.d_reclen = sizeof(item);
@@ -63,12 +78,23 @@ int main() {
     total = 0;
     warnings = 0;
     if (ListFolder("/fake/usermaps", true, names, kMaxListed) != 0 || warnings) return 4;
-    puts("PASS: 130 directory entries, bounded overflow warning, empty directory");
+    for (int kind = 1; kind <= 3; ++kind) {
+        total = 2;
+        malformed = kind;
+        warnings = 0;
+        count = ListFolder("/fake/usermaps", true, names, kMaxListed);
+        const int expectedWarnings = kind == 3 ? 0 : 1;
+        if (count != 1 || warnings != expectedWarnings || strcmp(names[0], "zm_map_0000")) {
+            fprintf(stderr, "malformed %d: count=%d warnings=%d\\n", kind, count, warnings);
+            return 5;
+        }
+    }
+    puts("PASS: 130 entries, overflow warning, empty, invalid lengths, unterminated name");
 }
 '''
 with tempfile.TemporaryDirectory() as temp:
     cpp = Path(temp) / "scan.cpp"
     exe = Path(temp) / "scan"
     cpp.write_text(prefix + f"constexpr int kMaxListed = {capacity};\n" + function + suffix)
-    subprocess.run(["g++", "-std=c++20", "-Wall", "-Wextra", "-Werror", "-O2", str(cpp), "-o", str(exe)], check=True)
+    subprocess.run(["g++", "-std=c++20", "-Wall", "-Wextra", "-Werror", "-O2", "-fsanitize=address,undefined", "-fno-sanitize-recover=all", str(cpp), "-o", str(exe)], check=True)
     subprocess.run([str(exe)], check=True)

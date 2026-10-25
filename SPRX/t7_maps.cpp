@@ -5,6 +5,7 @@
 #include "mod_load_context.hpp"
 
 #include <atomic>
+#include <cstddef>
 
 #ifdef _DEBUG
 extern "C" {
@@ -803,23 +804,34 @@ static int ListFolder(const char* folder, bool folders, char names[][kListedName
         if (n <= 0)
             break;
 
-        for (int at = 0; at + 8 <= n;)
+        constexpr size_t headerBytes = offsetof(SceKernelDirent, d_name);
+        for (size_t at = 0; at + headerBytes <= (size_t)n;)
         {
-            const SceKernelDirent* const entry = (const SceKernelDirent*)(buffer + at);
+            SceKernelDirent header{};
+            memcpy(&header, buffer + at, headerBytes);
+            const size_t length = header.d_reclen;
 
-            if (entry->d_reclen == 0)
+            if (length <= headerBytes || length > (size_t)n - at)
+            {
+                T7Log_Write("[Maps] invalid directory entry in %s (offset %zu, length %zu)", folder, at, length);
                 break;
+            }
 
-            at += entry->d_reclen;
+            const char* const name = buffer + at + headerBytes;
+            const size_t available = length - headerBytes < sizeof(header.d_name)
+                ? length - headerBytes : sizeof(header.d_name);
+            const char* const end = (const char*)memchr(name, 0, available);
+            at += length;
 
-            if (entry->d_fileno == 0 || entry->d_name[0] == '.')
+            if (!end || header.d_fileno == 0 || name[0] == '.')
                 continue;
 
-            if ((entry->d_type == SCE_KERNEL_DT_DIR) != folders || strlen(entry->d_name) >= kListedNameMax)
+            const size_t nameLength = (size_t)(end - name);
+            if ((header.d_type == SCE_KERNEL_DT_DIR) != folders || nameLength >= kListedNameMax)
                 continue;
 
             if (count < capacity)
-                snprintf(names[count++], kListedNameMax, "%s", entry->d_name);
+                snprintf(names[count++], kListedNameMax, "%s", name);
             else
                 overflow = true;
         }
