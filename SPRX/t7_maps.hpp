@@ -20,7 +20,8 @@ int T7Maps_UninstallResult(char* map, size_t mapSize, char* message, size_t mess
 
 bool T7Maps_InLevel();
 
-const char* T7Maps_CustomMapsLua();
+// Caller owns the returned heap allocation and must free it after Lua execution.
+char* T7Maps_CustomMapsLuaSnapshot();
 
 bool T7Maps_MapFile(const char* map, const char* file, char* path, size_t size);
 

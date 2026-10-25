@@ -1872,6 +1872,20 @@ static bool RunLua(const char* source, const char* chunk)
     return RunLuaOn(*(const uintptr_t*)(g_base + kLuaState), source, chunk);
 }
 
+// Take a private snapshot before invoking HKS: map refresh may run concurrently.
+static void RunCustomMapsLua()
+{
+    char* const source = T7Maps_CustomMapsLuaSnapshot();
+    if (!source)
+    {
+        T7Log_Write("[Lua] cannot snapshot custom map list");
+        return;
+    }
+
+    RunLua(source, "=bo3customs_maps");
+    free(source);
+}
+
 static char* ReadScript(const char* name)
 {
     char path[256];
@@ -1950,7 +1964,7 @@ static void HandleUninstall()
     if (result >= 0)
     {
         if (T7Maps_Refresh())
-            RunLua(T7Maps_CustomMapsLua(), "=bo3customs_maps");
+            RunCustomMapsLua();
 
         ReportUninstall(finished, result == 1, message);
         RunLua(k_refreshedLua, "=bo3customs_refreshed");
@@ -2130,7 +2144,7 @@ static void InjectScripts()
 
             if (script)
             {
-                RunLua(T7Maps_CustomMapsLua(), "=bo3customs_maps");
+                RunCustomMapsLua();
                 RunLua(script, "@ui_scripts/mapselect.lua");
                 free(script);
             }
@@ -2142,14 +2156,14 @@ static void InjectScripts()
 
             if (T7Maps_Refresh())
             {
-                RunLua(T7Maps_CustomMapsLua(), "=bo3customs_maps");
+                RunCustomMapsLua();
                 RunLua(k_refreshedLua, "=bo3customs_refreshed");
             }
         }
 
         if (T7Share_TakeMapsChanged())
         {
-            RunLua(T7Maps_CustomMapsLua(), "=bo3customs_maps");
+            RunCustomMapsLua();
             RunLua(k_refreshedLua, "=bo3customs_refreshed");
         }
 

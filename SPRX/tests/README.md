@@ -106,3 +106,22 @@ This validates only source-level snapshot consistency and host concurrency.
 It does **not** prove issue #43's 42-map launch error is fixed, run BO3 HKS,
 compile the full SPRX, or test PS4 BO3 1.33. The issue's two attached runtime
 logs were inaccessible when this change was prepared.
+
+## Custom-map Lua injection snapshot host regression
+
+On Linux with Python 3 and a C++20 compiler:
+
+```sh
+python3 SPRX/tests/custom_maps_snapshot_checks.py SPRX/t7_maps.cpp SPRX/t7_lua.cpp
+```
+
+The test extracts the production map-list reader/writer barrier and the new
+caller-owned snapshot helper. It checks empty and unterminated input, and two
+readers against 16,000 concurrent writes. All four custom-map Lua injection
+sites must execute their own immutable copy and release it after HKS returns.
+Previously, `T7Maps_CustomMapsLua()` exposed a shared buffer without holding
+the list-reader guard during Lua compilation and execution.
+
+This closes a separately verified source-level race; it does not establish the
+cause of issue #43's 42-map threshold. No full SPRX build, HKS or PS4 hardware
+validation is implied. Console.zip, its Lua files, and Tool/Porter are unchanged.

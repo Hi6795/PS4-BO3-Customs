@@ -6250,9 +6250,22 @@ bool T7Maps_InLevel()
     return T7Maps::g_inLevel;
 }
 
-const char* T7Maps_CustomMapsLua()
+// Return caller-owned Lua source: refresh can rebuild the shared buffer on
+// another thread, so no interpreter may retain its unprotected address.
+char* T7Maps_CustomMapsLuaSnapshot()
 {
-    return T7Maps::g_customMapsLua[0] ? T7Maps::g_customMapsLua : "rawset(_G, \"BO3CustomMaps\", {})\n";
+    using namespace T7Maps;
+
+    ListReader reading;
+    const char* const source = g_customMapsLua[0] ? g_customMapsLua : "rawset(_G, \"BO3CustomMaps\", {})\n";
+    const size_t length = strnlen(source, sizeof(g_customMapsLua));
+    if (length == sizeof(g_customMapsLua))
+        return nullptr;
+
+    char* const copy = (char*)malloc(length + 1);
+    if (copy)
+        memcpy(copy, source, length + 1);
+    return copy;
 }
 
 bool T7Maps_MapFile(const char* map, const char* file, char* path, size_t size)
