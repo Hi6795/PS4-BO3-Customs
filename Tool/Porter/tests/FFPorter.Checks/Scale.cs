@@ -49,7 +49,11 @@ internal static class ScaleChecks
             ThemeManager.Rescale();
             (double smaller, _) = Size(handle, dpi);
             Console.WriteLine($"   chosen 90%: scale {ThemeManager.Scale}, window {smaller:0} wide, settings {dialog.Width:0} wide");
-            Program.Check(Math.Abs(ThemeManager.Scale - 0.9) < 0.001 && Math.Abs(dialog.Width - SettingsWidth * 0.9) < 0.5 && Math.Abs(smaller - width / 1.25 * 0.9) <= 3,
+            // A small work area can clamp the original window and enforce a
+            // minimum width after rescaling; the native window honors both.
+            double minimumWidth = Math.Min(SmallestWidth * 0.9, workWidth * 0.9);
+            double expectedWidth = Math.Max(minimumWidth, Math.Min(width / 1.25 * 0.9, workWidth * 0.96));
+            Program.Check(Math.Abs(ThemeManager.Scale - 0.9) < 0.001 && Math.Abs(dialog.Width - SettingsWidth * 0.9) < 0.5 && Math.Abs(smaller - expectedWidth) <= 3,
                 "changing the size rescales the windows that are open");
         }
         finally
