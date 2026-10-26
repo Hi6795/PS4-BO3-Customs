@@ -1,0 +1,28 @@
+name: SPRX import lifetime regression
+
+on:
+  push:
+    paths:
+      - 'SPRX/t7_log.cpp'
+      - 'SPRX/tests/missing_import_lifetime_checks.py'
+      - '.github/workflows/sprx-import-lifetime.yml'
+  pull_request:
+    paths:
+      - 'SPRX/t7_log.cpp'
+      - 'SPRX/tests/missing_import_lifetime_checks.py'
+      - '.github/workflows/sprx-import-lifetime.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  import-lifetime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Verify released-script safety and native handler forwarding
+        run: python3 SPRX/tests/missing_import_lifetime_checks.py
