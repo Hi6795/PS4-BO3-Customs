@@ -3882,7 +3882,9 @@ static void AppendMods(const char (*names)[kNameMax], int wanted, int mode)
         if (through == at)
             break;
 
-        if (from == 0 && loads == 0)
+        // A stack entry can have no zones for this mode. Only clear claims
+        // after a real zone batch exists, never for an empty entry.
+        if (count > 0 && from == 0 && loads == 0)
             ResetScriptClaims();
 
         SetLoaded(through);
