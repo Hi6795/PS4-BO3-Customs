@@ -1,0 +1,107 @@
+name: BO3 Auto Build
+
+on:
+  push:
+    branches: [nexus/standalone-converter]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bo3-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host:
+    if: github.repository == 'Hi6795/PS4-BO3-Customs' && github.ref == 'refs/heads/nexus/standalone-converter'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install host regression dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang liblua5.4-0
+      - name: Validate GitHub Actions workflows
+        run: |
+          curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz -o "$RUNNER_TEMP/actionlint.tar.gz"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+      - name: Test release policy and package validation
+        run: python3 -m unittest discover -s .github/scripts/tests -v
+      - name: Run committed SPRX host regressions
+        run: python3 .github/scripts/run_host_checks.py
+
+  porter:
+    needs: host
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: Tool/Porter/global.json
+      - name: Run existing offline converter checks
+        shell: cmd
+        run: Tool\Porter\tests\run.cmd
+      - name: Publish and package the converter
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Push-Location Tool/Porter
+          dotnet publish src/FFPorter.Desktop.T7/FFPorter.Desktop.T7.csproj -p:PublishProfile=FolderProfile -o "$env:GITHUB_WORKSPACE/build/porter"
+          if ($LASTEXITCODE -ne 0) { throw 'Converter publish failed.' }
+          Pop-Location
+          python .github/scripts/build_support.py porter 'build/porter/PS4 .FF Porter.exe' build/artifact-porter
+          if ($LASTEXITCODE -ne 0) { throw 'Converter packaging failed.' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bo3-porter-${{ github.sha }}-${{ github.run_attempt }}
+          path: build/artifact-porter/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  sprx:
+    needs: host
+    if: vars.BO3_ORBIS_RUNNER_ENABLED == 'true'
+    runs-on: [self-hosted, Windows, X64, bo3-orbis]
+    timeout-minutes: 30
+    env:
+      BO3_SPRX_CONFIGURATION: ${{ vars.BO3_SPRX_CONFIGURATION || 'Debug' }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Compile the current console source
+        shell: pwsh
+        run: .github/scripts/build_sprx.ps1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bo3-sprx-${{ github.sha }}-${{ github.run_attempt }}
+          path: build/artifact-sprx/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  complete:
+    needs: [host, porter, sprx]
+    if: always() && github.repository == 'Hi6795/PS4-BO3-Customs' && github.ref == 'refs/heads/nexus/standalone-converter'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      HOST_RESULT: ${{ needs.host.result }}
+      PORTER_RESULT: ${{ needs.porter.result }}
+      SPRX_RESULT: ${{ needs.sprx.result }}
+    steps:
+      - name: Require every component before declaring this commit built
+        run: |
+          if [ "$HOST_RESULT" != success ] || [ "$PORTER_RESULT" != success ] || [ "$SPRX_RESULT" != success ]; then
+            echo '::error::Full build is blocked. Check all jobs. SPRX requires an online Windows X64 bo3-orbis runner and BO3_ORBIS_RUNNER_ENABLED=true.'
+            exit 1
+          fi
+          echo 'Host checks, offline converter checks and both builds passed. PS4 console validation is pending.' >> "$GITHUB_STEP_SUMMARY"

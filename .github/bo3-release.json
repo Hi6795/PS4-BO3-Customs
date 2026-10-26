@@ -1,0 +1,24 @@
+{
+  "repository": "Hi6795/PS4-BO3-Customs",
+  "branch": "nexus/standalone-converter",
+  "build_workflow": "bo3-build.yml",
+  "quiet_hours": 24,
+  "issue_repositories": ["Hi6795/PS4-BO3-Customs", "ItsJokerZz/PS4-BO3-Customs"],
+  "blocking_labels": ["release-blocker", "regression"],
+  "console": {
+    "url": "https://github.com/ItsJokerZz/PS4-BO3-Customs/releases/download/v4.00/Console.zip",
+    "sha256": "0b9af752ba84fe38eb3e734d495d871d8cb5cf5cf7c7a0edad5a6ef29bc2d5f0",
+    "size": 862304932,
+    "required_lua": [
+      "BO3-Customs/ui_scripts/graphics.lua",
+      "BO3-Customs/ui_scripts/kbm_strings.lua",
+      "BO3-Customs/ui_scripts/mapselect.lua",
+      "BO3-Customs/ui_scripts/maptable.lua",
+      "BO3-Customs/ui_scripts/mods.lua",
+      "BO3-Customs/ui_scripts/mouse.lua",
+      "BO3-Customs/ui_scripts/restart.lua",
+      "BO3-Customs/lui/ui/t7/utility/modsutility.lua",
+      "BO3-Customs/lui/ui/t7/utility/pcutility.lua"
+    ]
+  }
+}
