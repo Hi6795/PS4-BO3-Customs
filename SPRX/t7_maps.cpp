@@ -3608,23 +3608,54 @@ static int AddModZones(const ZoneInfo* zones, int count, ZoneInfo* out)
         return 0;
     }
 
-    BeginListWrite();
-    SetStack(names, wanted);
-    EndListWrite();
+    // Planning uses the global stack to resolve zone companions and paths.
+    // A request can produce zero zones even when recordsAvailable > 0 (for
+    // example a mod with no zones for this mode, or too few companion slots).
+    // Preserve the *exact* active stack until the new plan has entries.
+    const int previousCount = g_stackCount;
+    StackMod* previous = nullptr;
 
+    if (previousCount > 0)
+    {
+        previous = (StackMod*)malloc((size_t)previousCount * sizeof(StackMod));
+
+        if (!previous)
+        {
+            T7Log_Write("[Mods] cannot save the active stack for %s; retaining loaded mods", k_modeCommons[mode]);
+            return 0;
+        }
+    }
+
+    BeginListWrite();
+
+    if (previous)
+        memcpy(previous, g_stack, (size_t)previousCount * sizeof(StackMod));
+
+    SetStack(names, wanted);
     memcpy(out, zones, (size_t)count * sizeof(ZoneInfo));
     int records = recordsAvailable;
     int through = 0;
     const int added = StackEntries(0, mode, out + count, room, &records, &through);
 
+    if (added == 0)
+    {
+        if (previous)
+            memcpy(g_stack, previous, (size_t)previousCount * sizeof(StackMod));
+
+        g_stackCount = previousCount;
+    }
+
+    EndListWrite();
+    free(previous);
+
+    if (added == 0)
+        return 0;
+
     // A rejected stack (for example, no free zone records) must not erase
     // registrations owned by the mods that are still loaded. Claims are
     // replaced only when at least one new mod zone can actually be loaded.
-    if (added > 0)
-    {
-        ResetScriptClaims();
-        SetLoaded(through);
-    }
+    ResetScriptClaims();
+    SetLoaded(through);
 
     if (added > 0 && through < g_stackCount)
         g_applyWanted.store(true);
@@ -3877,7 +3908,27 @@ static void AppendMods(const char (*names)[kNameMax], int wanted, int mode)
 {
     const int from = g_loadedCount;
 
+    // SetStack also populates the file redirects. If the new zones cannot fit,
+    // those redirects must not point at mods that never actually loaded.
+    const int previousCount = g_stackCount;
+    StackMod* previous = nullptr;
+
+    if (previousCount > 0)
+    {
+        previous = (StackMod*)malloc((size_t)previousCount * sizeof(StackMod));
+
+        if (!previous)
+        {
+            T7Log_Write("[Mods] cannot save the active stack before appending; leaving loaded mods unchanged");
+            return;
+        }
+    }
+
     BeginListWrite();
+
+    if (previous)
+        memcpy(previous, g_stack, (size_t)previousCount * sizeof(StackMod));
+
     SetStack(names, wanted);
     EndListWrite();
 
@@ -3914,6 +3965,28 @@ static void AppendMods(const char (*names)[kNameMax], int wanted, int mode)
 
         at = through;
     }
+
+    if (g_loadedCount < g_stackCount)
+    {
+        BeginListWrite();
+
+        if (g_loadedCount == from)
+        {
+            if (previous)
+                memcpy(g_stack, previous, (size_t)previousCount * sizeof(StackMod));
+
+            g_stackCount = previousCount;
+        }
+        else
+        {
+            // A prefix loaded successfully; the remaining chosen mods did not.
+            g_stackCount = g_loadedCount;
+        }
+
+        EndListWrite();
+    }
+
+    free(previous);
 
     if (loads == 0 && g_loadedCount > from)
         T7Log_Write("[Mods] the newly ticked mods have nothing for %s", k_modeCommons[mode]);

@@ -15,5 +15,8 @@ capacity = re.search(
 assert capacity, "No early capacity rejection before stack mutation"
 assert capacity.end() < body.index("SetStack(names, wanted);"), "Stack changed before capacity check"
 assert "int records = recordsAvailable;" in body
-assert body.index("if (added > 0)") < body.index("ResetScriptClaims();", body.index("int records = recordsAvailable;"))
+assert "g_stackCount = previousCount;" in body, "Failed planning must restore the previous stack"
+planned = body.index("const int added = StackEntries(")
+assert body.index("if (added == 0)\n        return 0;", planned) < body.index("ResetScriptClaims();", planned), (
+    "Rejected zone batch erased active script claims")
 print("PASS: exhausted zone capacity leaves active stack, loaded names and script claims untouched")

@@ -1,4 +1,36 @@
-# Detour host regression checks
+# SPRX host regressions
+
+## Transactional mod-zone planning regression (issues #2 and #5)
+
+Run `python3 SPRX/tests/mod_stack_transaction_checks.py` on a Linux host with
+Python 3 and a C++20 compiler. The test compiles the production `AddModZones`
+body against deterministic planning and state fixtures. It first confirms that
+a mod request yielding zero loadable zones incorrectly overwrote the active
+stack's file/zone metadata in the previous revision. It then checks empty-mode
+requests, insufficient companion-record capacity, total capacity rejection,
+first-load rejection, rejected append, partial append, and successful replacement.
+Failed plans must leave the exact active stack, loaded names and script claims
+unchanged. Successful partial appends must not expose files from unplanned mods.
+The production fix temporarily snapshots active stack metadata and rolls it back
+if no zones can be planned; allocation failure also retains the old stack.
+
+These are host boundary tests, not validation of BO3's actual asset allocation,
+script precaching, multiplayer interaction, or PS4 firmware behavior.
+
+## Session mode and frontend reload checks (issues #3 and #4)
+
+`python3 SPRX/tests/session_mode_override_checks.py` extracts the exact C++
+scope guard from `LoadModeCommonForMods` and checks nested mode transitions,
+unchanged upper session bits, and restoration during C++ stack unwinding.
+It does not prove that game engine callbacks cannot observe the temporary mode.
+
+`python3 SPRX/tests/frontend_reload_checks.py` compiles the production
+`ReloadFrontend` function with a deterministic synchronous KillServer callback.
+It covers not-ready and in-level no-ops, absent movie hooks, and 100 repeated
+frontend reloads, preserving loaded-mod and script-claim metadata while clearing
+transient UI state. It cannot simulate a real BO3 server shutdown or HKS reload.
+
+## Detour host regression checks
 
 Run on x86-64 Linux with Python 3 and a C++17 compiler:
 
