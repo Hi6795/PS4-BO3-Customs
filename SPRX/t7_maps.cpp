@@ -4182,9 +4182,26 @@ static void LoadModeCommonForMods()
     common.allocFlags = kModeCommonFlags;
     common.freeFlags = kModeCommonFlags;
 
-    *session = saved & ~0xFu;
+    // Keep the temporary session override scoped to this synchronous load.
+    // Nested calls and early C++ unwinding must not leave the menu in Zombies mode.
+    struct SessionModeOverride
+    {
+        uint32_t* field;
+        uint32_t previous;
+
+        SessionModeOverride(uint32_t* target, uint32_t mode)
+            : field(target), previous(*target)
+        {
+            *field = (*field & ~0xFu) | mode;
+        }
+
+        ~SessionModeOverride() { *field = previous; }
+        SessionModeOverride(const SessionModeOverride&) = delete;
+        SessionModeOverride& operator=(const SessionModeOverride&) = delete;
+    };
+
+    SessionModeOverride zombiesMode(session, 0);
     LoadXAssets_h((uint64_t)&common, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-    *session = saved;
 }
 
 static bool IsUnshown(const char* name)
