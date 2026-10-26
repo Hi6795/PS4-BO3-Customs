@@ -83,7 +83,9 @@ def unpack_component(archive, destination, component, sha, run_id, attempt):
         if any(m.file_size > 512 * 1024 * 1024 or (m.external_attr >> 16) & 0o170000 == 0o120000
                for m in members):
             raise ValueError("Artifact contains an oversized file or symlink")
-        if bundle.getinfo(manifest_name).file_size > 32 * 1024:
+        # The pinned SDK's complete third-party license notices are retained
+        # in the native inspection report. They exceed the former 32 KiB cap.
+        if bundle.getinfo(manifest_name).file_size > 128 * 1024:
             raise ValueError("Oversized build manifest")
         manifest = json.loads(bundle.read(manifest_name))
         identity = (manifest.get("schema"), manifest.get("component"), manifest.get("commit"),
