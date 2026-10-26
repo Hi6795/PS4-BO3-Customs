@@ -17,6 +17,7 @@ ARGUMENTS = {
     "file_open_snapshot_checks.py": [], "map_directory_capacity_checks.py": [],
     "map_file_ownership_checks.py": [], "map_uninstall_directory_checks.py": [],
     "run_detour_checks.py": [],
+    "triage_runtime_errors.py": ["--self-test"],
 }
 
 
