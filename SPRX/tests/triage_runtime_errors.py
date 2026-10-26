@@ -35,11 +35,11 @@ def self_test():
     import io
     import tempfile
     sample = (
-        '[01:00.000] [Mods] m2_core_mod loads now (zm_common is already loaded)\\n'
-        '[01:00.001] [Script] server (gsc) runtime error 1 in scripts/zm/a.gsc +0xABC: undefined is not a field object\\n'
-        '[01:00.002] [Script] server (gsc) runtime error 2 in scripts/zm/a.gsc +0xABC: undefined is not a field object\\n'
-        '[01:00.003] [Server] shutdown "EXE_SERVERKILLED" (2 script runtime error(s) by then)\\n'
-        '[01:00.004] [Script] client (csc) runtime error 3 in scripts/zm/b.csc +0x9A1: effect is not precached\\n'
+        '[01:00.000] [Mods] m2_core_mod loads now (zm_common is already loaded)\n'
+        '[01:00.001] [Script] server (gsc) runtime error 1 in scripts/zm/a.gsc +0xABC: undefined is not a field object\n'
+        '[01:00.002] [Script] server (gsc) runtime error 2 in scripts/zm/a.gsc +0xABC: undefined is not a field object\n'
+        '[01:00.003] [Server] shutdown "EXE_SERVERKILLED" (2 script runtime error(s) by then)\n'
+        '[01:00.004] [Script] client (csc) runtime error 3 in scripts/zm/b.csc +0x9A1: effect is not precached\n'
     )
     with tempfile.TemporaryDirectory() as folder:
         path = pathlib.Path(folder) / 'log.txt'
