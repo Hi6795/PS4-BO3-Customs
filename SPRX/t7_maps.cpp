@@ -1782,14 +1782,17 @@ static void RenameStackAsset(uint64_t asset)
         return;
     }
 
-    if (g_stackCount < 2)
-        return;
-
+    // Register scripts even when only one mod is loaded. A second mod may
+    // be appended later without reloading the first mod's script assets;
+    // otherwise its scripts have no owner and duplicates are not hidden.
     if (type == kScriptParseTree)
     {
         ClaimStackScript(header, index);
         return;
     }
+
+    if (g_stackCount < 2)
+        return;
 
     int parsed = -1;
     char inner[kNameMax];
