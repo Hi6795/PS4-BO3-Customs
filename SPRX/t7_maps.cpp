@@ -3598,13 +3598,20 @@ static int AddModZones(const ZoneInfo* zones, int count, ZoneInfo* out)
     BeginListWrite();
     SetStack(names, wanted);
     EndListWrite();
-    ResetScriptClaims();
 
     memcpy(out, zones, (size_t)count * sizeof(ZoneInfo));
     int records = ZoneRecordsFree() - 2 * count;
     int through = 0;
     const int added = StackEntries(0, mode, out + count, room, &records, &through);
-    SetLoaded(added > 0 ? through : 0);
+
+    // A rejected stack (for example, no free zone records) must not erase
+    // registrations owned by the mods that are still loaded. Claims are
+    // replaced only when at least one new mod zone can actually be loaded.
+    if (added > 0)
+    {
+        ResetScriptClaims();
+        SetLoaded(through);
+    }
 
     if (added > 0 && through < g_stackCount)
         g_applyWanted.store(true);
