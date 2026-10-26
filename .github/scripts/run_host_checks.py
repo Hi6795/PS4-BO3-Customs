@@ -11,6 +11,7 @@ ARGUMENTS = {
     "map_table_snapshot_checks.py": ["SPRX/t7_maps.cpp"],
     "map_registry_capacity_checks.py": ["SPRX/t7_maps.cpp"],
     "mod_ui_claim_pruning_checks.py": ["SPRX/t7_maps.cpp"],
+    "mod_zone_capacity_checks.py": ["SPRX/t7_maps.cpp"],
     "lua_tick_checks.py": ["SPRX/t7_lua.cpp"],
     "lua_lobby_map_checks.py": ["SPRX/t7_lua.cpp"],
     "lua_native_probe_checks.py": ["SPRX/t7_lua.cpp"],
