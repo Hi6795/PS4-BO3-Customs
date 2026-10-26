@@ -58,7 +58,7 @@ class QuietPolicyTests(unittest.TestCase):
                 self.gate(hours=invalid)
 
 
-def fixture_archive(directory, component, *, sha=SHA, run_id=321, attempt=2):
+def fixture_archive(directory, component, *, sha=SHA, run_id=321, attempt=2, notice_lines=0):
     name, magic = ("PS4.FF.Porter.exe", b"MZ") if component == "porter" else ("BO3-Customs.sprx", b"\x4f\x15\x3d\x1d")
     contents = {name: magic + bytes(300), "LICENSE": b"test license\n"}
     manifest = {"schema": 1, "component": component, "commit": sha, "run_id": run_id,
@@ -73,6 +73,7 @@ def fixture_archive(directory, component, *, sha=SHA, run_id=321, attempt=2):
             "payload_segments_verified": 4, "console_validated": False, "sony_signed": False,
             "configuration": "Debug", "init": 32, "fini": 64,
             "exports": ["_init", "_fini", "module_start", "module_stop", "plugin_load", "plugin_unload", "g_pluginName"]}
+        manifest["target_validation"]["third_party_notices"] = {"SDK": "license\n" * notice_lines}
     archive = directory / (component + "-fixture.zip")
     with zipfile.ZipFile(archive, "w") as bundle:
         for name, data in contents.items():
@@ -130,6 +131,16 @@ class PackageTests(unittest.TestCase):
                     bundle.writestr(name, data)
             with self.assertRaises(ValueError):
                 unpack_component(archive, self.root / "out", "sprx", SHA, 321, 2)
+
+    def test_complete_sdk_license_notices_fit_in_manifest(self):
+        archive = fixture_archive(self.root, "sprx", notice_lines=6000)
+        manifest = unpack_component(archive, self.root / "out", "sprx", SHA, 321, 2)
+        self.assertEqual(len(manifest["target_validation"]["third_party_notices"]["SDK"]), 48000)
+
+    def test_oversized_manifest_is_still_rejected(self):
+        archive = fixture_archive(self.root, "sprx", notice_lines=20000)
+        with self.assertRaisesRegex(ValueError, "Oversized build manifest"):
+            unpack_component(archive, self.root / "out", "sprx", SHA, 321, 2)
 
     def console(self, files):
         archive = self.root / "Console.zip"
