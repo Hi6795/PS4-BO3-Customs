@@ -30,9 +30,43 @@ def summarize(path):
         print(f'    line {lineno}: {event}')
     return groups
 
+def self_test():
+    import contextlib
+    import io
+    import tempfile
+    sample = (
+        '[01:00.000] [Mods] m2_core_mod loads now (zm_common is already loaded)\\n'
+        '[01:00.001] [Script] server (gsc) runtime error 1 in scripts/zm/a.gsc +0xABC: undefined is not a field object\\n'
+        '[01:00.002] [Script] server (gsc) runtime error 2 in scripts/zm/a.gsc +0xABC: undefined is not a field object\\n'
+        '[01:00.003] [Server] shutdown "EXE_SERVERKILLED" (2 script runtime error(s) by then)\\n'
+        '[01:00.004] [Script] client (csc) runtime error 3 in scripts/zm/b.csc +0x9A1: effect is not precached\\n'
+    )
+    with tempfile.TemporaryDirectory() as folder:
+        path = pathlib.Path(folder) / 'log.txt'
+        path.write_text(sample)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            groups = summarize(path)
+        assert sum(map(len, groups.values())) == 3
+        assert len(groups) == 2
+        result = output.getvalue()
+        assert 'line 1:' in result and '[Mods] m2_core_mod loads now' in result
+        assert 'line 2:' in result and '[FirstError] scripts/zm/a.gsc' in result
+        assert 'line 4:' in result and '[Server] shutdown' in result
+        assert 'line 5:' in result and '[FirstError] scripts/zm/b.csc' in result
+        assert result.index('line 1:') < result.index('line 2:') < result.index('line 4:') < result.index('line 5:')
+    print('runtime-error triage self-test: PASS')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('logs', type=pathlib.Path, nargs='+')
+    parser.add_argument('--self-test', action='store_true')
+    parser.add_argument('logs', type=pathlib.Path, nargs='*')
     args = parser.parse_args()
-    for log in args.logs:
-        summarize(log)
+    if args.self_test:
+        self_test()
+    elif not args.logs:
+        parser.error('provide at least one log or --self-test')
+    else:
+        for log in args.logs:
+            summarize(log)
