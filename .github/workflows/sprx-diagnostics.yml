@@ -33,3 +33,4 @@ jobs:
           g++ -std=c++20 -Wall -Wextra -Werror -O1 -pthread SPRX/tests/script_error_budget_tests.cpp -o build/diagnostics/error-budget
           build/diagnostics/error-budget
           python3 SPRX/tests/diagnostic_hook_checks.py
+          python3 SPRX/tests/missing_import_lifetime_checks.py

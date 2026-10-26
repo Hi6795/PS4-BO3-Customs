@@ -69,3 +69,21 @@ switches and map/peer joins on console. Exact clientfield-schema comparisons and
 VM caller-stack decoding still require verified engine layouts; this change
 does not guess them. Complex mismatch, bot/post-spawn crashes and the reported
 save warning remain runtime investigation targets.
+
+## Failed-import record lifetime
+
+Failed imports are captured as owned, bounded script names and import metadata,
+separately for GSC and CSC. The dialog consumes these records once and never
+reads a retained script-buffer pointer. Names with unreadable headers/offsets
+use an explicit fallback. Level epochs invalidate old records, including a
+resolver that returns after the next level has started. Snapshot capture and
+consumption use a nonblocking lock; contention omits optional diagnostics rather
+than delaying the native resolver/error handler.
+
+`python3 SPRX/tests/missing_import_lifetime_checks.py` compiles the actual hook
+bodies, captures an import and revokes access to its original script page before
+showing the error. The unfixed hook crashes with SIGSEGV; the corrected hook
+reports the copied name and forwards the original error. The test also covers
+independent VM records, one-time consumption, level reset, reset during native
+resolution and argument/return passthrough. This fixes a secondary crash in
+Debug error reporting, not the underlying unresolved import or map mismatch.
