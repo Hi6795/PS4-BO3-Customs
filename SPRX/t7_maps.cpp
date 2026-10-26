@@ -3591,10 +3591,29 @@ static void WaitForModZones(const ZoneInfo* zones, int count, int from)
     }
 }
 
+static void TraceModTransition(const char* when, const char* level);
+
 static uint64_t LoadXAssets_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
                               double x0, double x1, double x2, double x3, double x4, double x5, double x6,
                               double x7)
 {
+#ifdef _DEBUG
+    if (a1 && a2 > 0 && a2 <= kMaxZoneCall && (g_modCount > 0 || g_loadedCount > 0))
+    {
+        const ZoneInfo* const requested = (const ZoneInfo*)a1;
+        for (unsigned i = 0; i < (unsigned)a2; ++i)
+        {
+            if (!requested[i].name) continue;
+            const char* const name = requested[i].name;
+            if (EqualsNoCase(name, "core_frontend") || EqualsNoCase(name, "zm_common") ||
+                EqualsNoCase(name, "mp_common") || EqualsNoCase(name, "cp_common"))
+            {
+                TraceModTransition("zone request", name);
+                break;
+            }
+        }
+    }
+#endif
     ZoneInfo withMods[kMaxZoneCall];
     const uint64_t self = (uint64_t)scePthreadSelf();
 
@@ -3756,6 +3775,32 @@ static int SessionModeCommon()
     default:
         return -1;
     }
+}
+
+static void TraceModTransition(const char* when, const char* level)
+{
+#ifdef _DEBUG
+    const int loadedMode = LoadedModeCommon();
+    const int sessionMode = SessionModeCommon();
+    char names[kMaxStack][kNameMax];
+    const int wanted = ChosenForLoad(names);
+    uint32_t modZones = 0;
+    for (int i = 0; i < kModZoneKinds; ++i)
+        if (ZoneLoaded(k_modZones[i])) modZones |= 1u << i;
+    T7Log_Write("[Transition] %s %s: session=%s loaded-common=%s selected=%d loaded=%d "
+                "mod-zone-mask=0x%X common-on-top=%d pending-reload=%d waiting-zones=%d",
+                when, level ? level : "(none)", sessionMode > 0 ? k_modeCommons[sessionMode] : "unknown",
+                loadedMode > 0 ? k_modeCommons[loadedMode] : "none", wanted, g_loadedCount,
+                modZones, ModeCommonOnTop() ? 1 : 0, g_reloadCheck ? 1 : 0, g_waitZoneCount);
+    for (int i = 0; i < wanted && i < kMaxStack; ++i)
+        T7Log_Write("[Transition] selected mod %d: %s", i + 1, names[i]);
+    for (int i = 0; i < g_loadedCount && i < kMaxStack; ++i)
+        T7Log_Write("[Transition] loaded mod %d: %s", i + 1, g_loaded[i]);
+    T7Lua_TraceState(when);
+#else
+    (void)when;
+    (void)level;
+#endif
 }
 
 static void ClearAssetsInUse()
@@ -4287,10 +4332,23 @@ static uint64_t LoadLevelZones_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t
 {
     const char* const level = (const char*)a1;
 
-    if (level && RangeReadable(a1, 1) && level[0] && !EqualsNoCase(level, "core_frontend"))
+    const bool named = level && RangeReadable(a1, 1) && level[0];
+#ifdef _DEBUG
+    char diagnosticLevel[kNameMax];
+    snprintf(diagnosticLevel, sizeof(diagnosticLevel), "%.*s", (int)sizeof(diagnosticLevel) - 1,
+                named && RangeReadable(a1, sizeof(diagnosticLevel)) ? level : "(unnamed/unreadable)");
+    if (named)
+        TraceModTransition("before level zones", diagnosticLevel);
+#endif
+    if (named && !EqualsNoCase(level, "core_frontend"))
         ApplyModsBeforeLevel(level);
 
-    return ((Hook_t)g_levelZonesOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
+    const uint64_t result = ((Hook_t)g_levelZonesOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
+#ifdef _DEBUG
+    if (named)
+        TraceModTransition("after level zones", diagnosticLevel);
+#endif
+    return result;
 }
 
 static uint64_t BlockJob_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
@@ -6835,3 +6893,4 @@ void T7Maps_FrameHeartbeat()
         FrameHeartbeat();
 #endif
 }
+

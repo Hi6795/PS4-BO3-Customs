@@ -16,3 +16,7 @@ bool T7Lua_DvarString(const char* name, char* out, size_t size);
 bool T7Lua_IsUiState(uintptr_t L);
 
 void T7Lua_RunShareVm(uintptr_t L);
+
+
+// Read-only, try-lock diagnostic snapshot; it does not execute Lua.
+void T7Lua_TraceState(const char* reason);

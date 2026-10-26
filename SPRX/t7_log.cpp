@@ -3,6 +3,8 @@
 
 #ifdef _DEBUG
 
+#include "script_error_budget.hpp"
+
 namespace T7Log
 {
 constexpr uintptr_t kUiLuaError   = 0xDB4050;
@@ -32,7 +34,6 @@ constexpr uintptr_t kStateTop   = 0x48;
 constexpr uintptr_t kStateStack = 0x60;
 
 constexpr uint32_t kUiErrorsLogged     = 100;
-constexpr uint32_t kScriptErrorsLogged = 200;
 constexpr uint32_t kMissingLogged      = 3000;
 constexpr uint32_t kCommandsLogged     = 200;
 constexpr int      kShutdownNotes      = 8;
@@ -232,6 +233,7 @@ static volatile uint32_t g_commands = 0;
 static volatile int32_t  g_lock = 0;
 static volatile uint32_t g_uiErrors = 0;
 static volatile uint32_t g_scriptErrors = 0;
+static T7Diagnostics::ScriptErrorBudget g_scriptBudget;
 static volatile uint32_t g_missingCount = 0;
 static volatile uint64_t g_missingSeen[kMissingSlots];
 
@@ -926,28 +928,66 @@ static const char* ScriptAt(uintptr_t codePos, uint32_t* offset)
     return nullptr;
 }
 
+static const char* ScriptVmName(unsigned vm)
+{
+    return vm == 0 ? "server (gsc)" : vm == 1 ? "client (csc)" : "unknown VM";
+}
+
+static void ScriptText(uintptr_t address, char (&text)[192])
+{
+    // Only inspect a bounded, validated span; the VM still owns the message.
+    if (address && RangeReadable(address, sizeof(text)))
+        snprintf(text, sizeof(text), "%.*s", (int)sizeof(text) - 1, (const char*)address);
+    else
+        snprintf(text, sizeof(text), "%s", address ? "(unreadable message)" : "(no message)");
+}
+
+static void ScriptErrorSummary(const char* when)
+{
+    using Budget = T7Diagnostics::ScriptErrorBudget;
+    Budget::Counts counts[Budget::kVms];
+    uint32_t busy[Budget::kVms];
+    if (!g_scriptBudget.Snapshot(counts, busy))
+    {
+        T7Log_Write("[Script] error summary deferred (%s): diagnostic table busy", when);
+        return;
+    }
+    for (unsigned vm = 0; vm < Budget::kVms; ++vm)
+    {
+        const Budget::Counts& count = counts[vm];
+        if (count.total || busy[vm])
+            T7Log_Write("[Script] %s summary (%s): %u observed, %u distinct retained, "
+                        "%u outside the distinct limit, %u omitted during concurrent diagnostics",
+                        ScriptVmName(vm), when, count.total, count.unique, count.overflow, busy[vm]);
+    }
+}
+
 static uint64_t ScriptError(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
                             double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
 {
     const uint32_t count = __sync_add_and_fetch(&g_scriptErrors, 1);
-
-    if (count <= kScriptErrorsLogged)
+    const int inst = (int)(uint32_t)a1;
+    const uintptr_t vm = inst >= 0 && inst < 2 ? g_base + kScrVmPub + 0x70 * (uintptr_t)inst : 0;
+    const uintptr_t raised = vm && RangeReadable(vm + 0x10, sizeof(uintptr_t)) ? *(const uintptr_t*)(vm + 0x10) : 0;
+    char message[192], dialog[192];
+    ScriptText(raised, message);
+    ScriptText(a4, dialog);
+    using Budget = T7Diagnostics::ScriptErrorBudget;
+    const Budget::Result note = g_scriptBudget.Observe(inst, a2, Budget::Hash(message, sizeof(message)),
+                                                       Budget::Hash(dialog, sizeof(dialog)));
+    if (note.kind == Budget::Kind::First || note.kind == Budget::Kind::Repeat)
     {
-        const int inst = (int)(uint32_t)a1;
-        const uintptr_t raised =
-            inst >= 0 && inst < 2 ? *(const uintptr_t*)(g_base + kScrVmPub + 0x70 * (uintptr_t)inst + 0x10) : 0;
-        const char* const message = ReadableText(raised);
-        const char* const dialog = ReadableText(a4);
         uint32_t offset = 0;
         const char* const script = ScriptAt(a2, &offset);
-
-        T7Log_Write("[Script] %s runtime error %u in %s +0x%X: %s%s%s", inst == 1 ? "client (csc)" : "server (gsc)",
-                    count, script ? script : "(no loaded script holds the code position)", offset,
-                    message ? message : "(no message)", dialog && dialog != message ? " / " : "",
-                    dialog && dialog != message ? dialog : "");
-
-        if (count == kScriptErrorsLogged)
-            T7Log_Write("[Script] %u runtime errors this level - the rest are not logged", kScriptErrorsLogged);
+        T7Log_Write("[Script] %s runtime error %u in %s +0x%X: %s%s%s (occurrence %u)",
+                    ScriptVmName(note.vm), count, script ? script : "(no loaded script holds the code position)",
+                    offset, message, a4 && a4 != raised ? " / " : "", a4 && a4 != raised ? dialog : "",
+                    note.occurrences);
+    }
+    else if (note.kind == Budget::Kind::Overflow)
+    {
+        T7Log_Write("[Script] %s distinct-error table full (%u retained); %u additional error(s) not detailed",
+                    ScriptVmName(note.vm), Budget::kSlots, note.occurrences);
     }
 
     return ((Passthrough_t)g_scriptErrorOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
@@ -978,6 +1018,7 @@ static uint64_t ErrorDialog(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, 
 {
     const char* const message = ReadableText(a2);
 
+    ScriptErrorSummary("Com_Error");
     T7Log_Write("[Error] Com_Error %u: %s (%u script runtime error(s) this level)", (uint32_t)a1,
                 message ? message : "(no message)", g_scriptErrors);
 
@@ -1366,6 +1407,8 @@ void T7Log_NewLevel()
     for (int i = 0; i < kMissingSlots; ++i)
         g_missingSeen[i] = 0;
 
+    ScriptErrorSummary("end of previous level");
+    g_scriptBudget.NewLevel();
     g_missingCount = 0;
     g_scriptErrors = 0;
     g_uiErrors = 0;
@@ -1462,3 +1505,4 @@ void T7Log_PoolOut(int32_t)
 }
 
 #endif
+
