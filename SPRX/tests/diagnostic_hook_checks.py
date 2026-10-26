@@ -6,7 +6,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 LOG = (ROOT / "t7_log.cpp").read_text()
-HOOK = LOG[LOG.index("static const char* ScriptVmName("):LOG.index("static uint64_t ScriptImport(")]
+HOOK_END = LOG.index("static bool CopyImportName(") if "static bool CopyImportName(" in LOG else LOG.index("static uint64_t ScriptImport(")
+HOOK = LOG[LOG.index("static const char* ScriptVmName("):HOOK_END]
 PREFIX = r'''
 #include "script_error_budget.hpp"
 #include <cassert>

@@ -198,14 +198,17 @@ struct MissingImport
 {
     bool      valid;
     int       inst;
-    uintptr_t script;
+    uint32_t  epoch;
+    char      script[kNameMax];
     uint32_t  name;
     uint32_t  space;
     uint8_t   params;
     uint8_t   flags;
 };
 
-static MissingImport g_missingImport{};
+static MissingImport g_missingImports[2]{};
+static std::atomic_flag g_importLock = ATOMIC_FLAG_INIT;
+static std::atomic<uint32_t> g_importEpoch{1};
 static Detour g_defaultDetour{};
 static void*  g_defaultOriginal = nullptr;
 static Detour g_exitLevelDetour{};
@@ -993,21 +996,74 @@ static uint64_t ScriptError(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, 
     return ((Passthrough_t)g_scriptErrorOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
 }
 
+static bool CopyImportName(uintptr_t script, char (&name)[kNameMax])
+{
+    if (!script || !RangeReadable(script, 56))
+        return false;
+    const uint32_t offset = *(const uint32_t*)(script + 52);
+    if (offset > UINTPTR_MAX - script)
+        return false;
+    const uintptr_t address = script + offset;
+    for (size_t i = 0; i < sizeof(name) - 1; ++i)
+    {
+        if (i > UINTPTR_MAX - address || !RangeReadable(address + i, 1))
+            return false;
+        name[i] = *(const char*)(address + i);
+        if (!name[i])
+            return i > 0;
+    }
+    name[sizeof(name) - 1] = 0;
+    return true;
+}
+
+static void ResetMissingImports()
+{
+    // A resolver already in flight must not republish a previous level's record.
+    g_importEpoch.fetch_add(1, std::memory_order_acq_rel);
+}
+
+static int TakeMissingImports(MissingImport (&out)[2])
+{
+    if (g_importLock.test_and_set(std::memory_order_acquire))
+        return 0;
+    const uint32_t epoch = g_importEpoch.load(std::memory_order_acquire);
+    int count = 0;
+    for (MissingImport& note : g_missingImports)
+    {
+        if (note.valid && note.epoch == epoch)
+            out[count++] = note;
+        note.valid = false;
+    }
+    g_importLock.clear(std::memory_order_release);
+    return count;
+}
+
 static uint64_t ScriptImport(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
                              double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
 {
+    const uint32_t epoch = g_importEpoch.load(std::memory_order_acquire);
     const uint64_t result =
         ((Passthrough_t)g_scriptImportOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
 
-    if (!(uint8_t)result && a2 && a3 && RangeReadable(a3, 12) && RangeReadable(a2, 64))
+    const int inst = (int)(uint32_t)a1;
+    if (!(uint8_t)result && inst >= 0 && inst < 2 && a3 && RangeReadable(a3, 12))
     {
-        g_missingImport.valid = true;
-        g_missingImport.inst = (int)(uint32_t)a1;
-        g_missingImport.script = (uintptr_t)a2;
-        g_missingImport.name = *(const uint32_t*)a3;
-        g_missingImport.space = *(const uint32_t*)(a3 + 4);
-        g_missingImport.params = *(const uint8_t*)(a3 + 10);
-        g_missingImport.flags = *(const uint8_t*)(a3 + 11);
+        MissingImport note{};
+        note.valid = true;
+        note.inst = inst;
+        note.epoch = epoch;
+        note.name = *(const uint32_t*)a3;
+        note.space = *(const uint32_t*)(a3 + 4);
+        note.params = *(const uint8_t*)(a3 + 10);
+        note.flags = *(const uint8_t*)(a3 + 11);
+        if (!CopyImportName(a2, note.script))
+            snprintf(note.script, sizeof(note.script), "%s", "(unnamed/unreadable script)");
+        if (!g_importLock.test_and_set(std::memory_order_acquire))
+        {
+            if (epoch == g_importEpoch.load(std::memory_order_acquire))
+                g_missingImports[inst] = note;
+            g_importLock.clear(std::memory_order_release);
+        }
     }
 
     return result;
@@ -1022,16 +1078,18 @@ static uint64_t ErrorDialog(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, 
     T7Log_Write("[Error] Com_Error %u: %s (%u script runtime error(s) this level)", (uint32_t)a1,
                 message ? message : "(no message)", g_scriptErrors);
 
-    if (message && strstr(message, "script error(s)") && g_missingImport.valid)
+    if (message && strstr(message, "script error(s)"))
     {
-        const uintptr_t script = g_missingImport.script;
-        const char* const name = ReadableText(script + *(const uint32_t*)(script + 52));
-
-        T7Log_Write("[Script] the last %s call the linker could not resolve: function 0x%08X in namespace 0x%08X "
-                    "(%u parameter(s), import kind %u, flags 0x%02X), called from %s",
-                    g_missingImport.inst == 1 ? "client (csc)" : "server (gsc)", g_missingImport.name,
-                    g_missingImport.space, g_missingImport.params, g_missingImport.flags & 0xF, g_missingImport.flags,
-                    name ? name : "(unnamed script)");
+        MissingImport pending[2];
+        const int count = TakeMissingImports(pending);
+        for (int i = 0; i < count; ++i)
+        {
+            const MissingImport& note = pending[i];
+            T7Log_Write("[Script] the last %s call the linker could not resolve: function 0x%08X in namespace 0x%08X "
+                        "(%u parameter(s), import kind %u, flags 0x%02X), called from %s",
+                        note.inst == 1 ? "client (csc)" : "server (gsc)", note.name,
+                        note.space, note.params, note.flags & 0xF, note.flags, note.script);
+        }
     }
 
     return ((Passthrough_t)g_errorDialogOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
@@ -1409,6 +1467,7 @@ void T7Log_NewLevel()
 
     ScriptErrorSummary("end of previous level");
     g_scriptBudget.NewLevel();
+    ResetMissingImports();
     g_missingCount = 0;
     g_scriptErrors = 0;
     g_uiErrors = 0;
