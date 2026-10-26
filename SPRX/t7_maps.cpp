@@ -3868,9 +3868,8 @@ static void AppendMods(const char (*names)[kNameMax], int wanted, int mode)
     SetStack(names, wanted);
     EndListWrite();
 
-    if (from == 0)
-        ResetScriptClaims();
-
+    // Keep existing claims if the requested stack cannot allocate any zones.
+    // The reset is deferred until the first batch has actually been planned.
     int records = ZoneRecordsFree();
     int loads = 0;
 
@@ -3882,6 +3881,9 @@ static void AppendMods(const char (*names)[kNameMax], int wanted, int mode)
 
         if (through == at)
             break;
+
+        if (from == 0 && loads == 0)
+            ResetScriptClaims();
 
         SetLoaded(through);
 
