@@ -3598,12 +3598,22 @@ static int AddModZones(const ZoneInfo* zones, int count, ZoneInfo* out)
     if (room <= 0 || count + room > kMaxZoneCall)
         return 0;
 
+    // Do not replace the active stack if the game's zone table cannot hold
+    // even one additional record. Existing script/UI ownership must remain
+    // attached to the stack that is actually loaded.
+    const int recordsAvailable = ZoneRecordsFree() - 2 * count;
+    if (recordsAvailable <= 0)
+    {
+        T7Log_Write("[Mods] no free zone records for %s; retaining the currently loaded stack", k_modeCommons[mode]);
+        return 0;
+    }
+
     BeginListWrite();
     SetStack(names, wanted);
     EndListWrite();
 
     memcpy(out, zones, (size_t)count * sizeof(ZoneInfo));
-    int records = ZoneRecordsFree() - 2 * count;
+    int records = recordsAvailable;
     int through = 0;
     const int added = StackEntries(0, mode, out + count, room, &records, &through);
 
