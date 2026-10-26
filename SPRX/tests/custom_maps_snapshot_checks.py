@@ -49,7 +49,9 @@ int main() {
     std::memset(g_customMapsLua, 'x', sizeof(g_customMapsLua));
     EndListWrite();
     assert(T7Maps_CustomMapsLuaSnapshot() == nullptr);
-    BeginListWrite(); g_customMapsLua[0] = 0; EndListWrite();
+    // Empty-source fallback was checked above. Seed a valid stress payload so
+    // readers starting before the writer do not mistake that fallback for corruption.
+    BeginListWrite(); std::strcpy(g_customMapsLua, "MAP:0:0"); EndListWrite();
     constexpr int rounds = 16000;
     std::atomic<bool> done{false};
     std::atomic<int> failures{0};

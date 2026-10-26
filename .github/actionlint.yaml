@@ -1,0 +1,3 @@
+self-hosted-runner:
+  labels:
+    - bo3-orbis
