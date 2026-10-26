@@ -57,6 +57,9 @@
     <ClInclude Include="headers.hpp">
       <Filter>Headers</Filter>
     </ClInclude>
+    <ClInclude Include="version.hpp">
+      <Filter>Headers</Filter>
+    </ClInclude>
     <ClInclude Include="platform.hpp">
       <Filter>Headers</Filter>
     </ClInclude>

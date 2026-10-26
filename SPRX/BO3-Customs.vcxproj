@@ -28,6 +28,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="headers.hpp" />
+    <ClInclude Include="version.hpp" />
     <ClInclude Include="libjbc.h" />
     <ClInclude Include="platform.hpp" />
     <ClInclude Include="Detour.hpp" />

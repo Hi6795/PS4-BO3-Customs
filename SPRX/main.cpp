@@ -1,4 +1,5 @@
 #include "headers.hpp"
+#include "version.hpp"
 
 #include <atomic>
 
@@ -128,14 +129,17 @@ static void* start_thread(void*)
     }
 
     if (T7Maps_MapCount() < 0)
-        Notify("BO3 Customs Mod loaded!\nCreated by ItsJokerZz. This game build is not supported - it needs version 1.33");
+        Notify("BO3 Customs SPRX %s loaded!\nCreated by ItsJokerZz. This game build is not supported - it needs version 1.33",
+               BO3_CUSTOMS_SPRX_VERSION);
     else
     {
         char buff[256];
         if (T7Maps_ModCount() > 0)
-            snprintf(buff, sizeof(buff), "BO3 Customs Mod loaded!\nCreated by ItsJokerZz.\nFound %d custom map(s) and %d mod(s)", T7Maps_MapCount(), T7Maps_ModCount());
+            snprintf(buff, sizeof(buff), "BO3 Customs SPRX %s loaded!\nCreated by ItsJokerZz.\nFound %d custom map(s) and %d mod(s)",
+                     BO3_CUSTOMS_SPRX_VERSION, T7Maps_MapCount(), T7Maps_ModCount());
         else
-            snprintf(buff, sizeof(buff), "BO3 Customs Mod loaded!\nCreated by ItsJokerZz.\nFound %d custom map(s)", T7Maps_MapCount());
+            snprintf(buff, sizeof(buff), "BO3 Customs SPRX %s loaded!\nCreated by ItsJokerZz.\nFound %d custom map(s)",
+                     BO3_CUSTOMS_SPRX_VERSION, T7Maps_MapCount());
         Notify(buff);
     }
 

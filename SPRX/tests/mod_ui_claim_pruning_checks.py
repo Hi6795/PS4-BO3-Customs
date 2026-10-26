@@ -33,6 +33,8 @@ constexpr size_t kNameMax = 56;
 static char g_modUiFiles[kMaxModUiFiles][96], g_modUiOwners[kMaxModUiFiles][kNameMax];
 static int g_modUiFileCount = 0, g_loadedCount = 0;
 static char g_loaded[kMaxStack][kNameMax];
+static char g_uiMods[kMaxStack][kNameMax], g_dllMods[kMaxStack][kNameMax];
+static int g_uiModCount = 0, g_dllModCount = 0;
 static std::atomic<bool> g_modsLuaDirty{false};
 struct ClaimLock { ClaimLock() {} ~ClaimLock() {} };
 static bool EqualsNoCase(const char* a, const char* b) {
@@ -50,6 +52,10 @@ static void add(const char* owner, const char* file) {
     ++g_modUiFileCount;
 }
 int main() {
+    std::snprintf(g_uiMods[g_uiModCount++], kNameMax, "OldMod");
+    std::snprintf(g_uiMods[g_uiModCount++], kNameMax, "NewMod");
+    std::snprintf(g_dllMods[g_dllModCount++], kNameMax, "OldMod");
+    std::snprintf(g_dllMods[g_dllModCount++], kNameMax, "NewMod");
     for (int i = 0; i < kMaxModUiFiles; ++i) {
         char file[64]; std::snprintf(file, sizeof(file), "ui/old/%04d.lua", i);
         add("OldMod", file);
@@ -57,7 +63,8 @@ int main() {
     add("NewMod", "ui/new.lua");
     if (g_modUiFileCount != 1024) return 1;
     PruneUnloadedModUiFiles();
-    if (g_modUiFileCount != 0 || !g_modsLuaDirty.load()) return 2;
+    if (g_modUiFileCount != 0 || !g_modsLuaDirty.load() ||
+        g_uiModCount != 0 || g_dllModCount != 0) return 2;
     add("NewMod", "ui/new.lua");
     if (g_modUiFileCount != 1 || std::strcmp(g_modUiOwners[0], "NewMod")) return 3;
     g_modUiFileCount = 0;
@@ -67,17 +74,24 @@ int main() {
     add("NewMod", "ui/second.lua");
     std::snprintf(g_loaded[0], sizeof(g_loaded[0]), "NEWMOD");
     g_loadedCount = 1;
+    std::snprintf(g_uiMods[g_uiModCount++], kNameMax, "OldMod");
+    std::snprintf(g_uiMods[g_uiModCount++], kNameMax, "NewMod");
+    std::snprintf(g_dllMods[g_dllModCount++], kNameMax, "OldMod");
+    std::snprintf(g_dllMods[g_dllModCount++], kNameMax, "NewMod");
     g_modsLuaDirty.store(false);
     PruneUnloadedModUiFiles();
     if (g_modUiFileCount != 2 || !g_modsLuaDirty.load()) return 4;
     if (std::strcmp(g_modUiFiles[0], "ui/first.lua") ||
         std::strcmp(g_modUiFiles[1], "ui/second.lua")) return 5;
+    if (g_uiModCount != 1 || std::strcmp(g_uiMods[0], "NewMod") ||
+        g_dllModCount != 1 || std::strcmp(g_dllMods[0], "NewMod")) return 8;
     g_modsLuaDirty.store(false);
     PruneUnloadedModUiFiles();
     if (g_modUiFileCount != 2 || g_modsLuaDirty.load()) return 6;
     g_loadedCount = 0;
     PruneUnloadedModUiFiles();
-    if (g_modUiFileCount != 0 || !g_modsLuaDirty.load()) return 7;
+    if (g_modUiFileCount != 0 || !g_modsLuaDirty.load() ||
+        g_uiModCount != 0 || g_dllModCount != 0) return 7;
     return 0;
 }
 '''.replace("FUNCTION", function)
@@ -97,4 +111,4 @@ with tempfile.TemporaryDirectory() as d:
         ], check=True)
         subprocess.run([str(exe)], check=True)
         print(f"{compiler}: PASS (1024 stale, recovery, mixed active, case, idempotence)")
-print("PASS: all three unload/update call sites present")
+print("PASS: unload/update call sites and UI/DLL ownership classification cleanup")

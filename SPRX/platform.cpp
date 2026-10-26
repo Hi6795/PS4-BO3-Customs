@@ -140,6 +140,27 @@ bool RangeReadable(uintptr_t addr, size_t span) {
     return end != 0 && (addr + span) <= end;
 }
 
+bool SafeReadableCString(uintptr_t addr, size_t maxBytes, size_t* length) {
+    if (!addr || !maxBytes)
+        return false;
+
+    const uintptr_t end = ReadableEnd(addr, maxBytes);
+
+    if (!end || end <= addr)
+        return false;
+
+    const size_t available = (size_t)(end - addr) < maxBytes ? (size_t)(end - addr) : maxBytes;
+    const void* const terminator = memchr((const void*)addr, 0, available);
+
+    if (!terminator)
+        return false;
+
+    if (length)
+        *length = (size_t)((uintptr_t)terminator - addr);
+
+    return true;
+}
+
 bool SafeStrStr(uintptr_t addr, const char* target, size_t maxScan) {
     if (addr < 0x10000 || addr >= 0x0000800000000000ULL || !target)
         return false;

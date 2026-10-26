@@ -313,6 +313,9 @@ static ModLoadContexts         g_loadingZones;
 static ModLoadContexts         g_plainZones;
 static std::atomic<bool>       g_applyWanted{false};
 static std::atomic<bool>       g_prefetchWanted{false};
+static bool                    g_applyDeferred = false;
+static bool                    g_prefetchDeferred = false;
+static std::atomic<uint32_t>   g_modDispatchSerial{0};
 static bool                    g_reloadHeld = false;
 static bool                    g_reloadForced = false;
 static bool                    g_refreshOnClose = false;
@@ -1592,6 +1595,39 @@ static void PruneUnloadedModUiFiles()
         g_modUiFileCount = kept;
         g_modsLuaDirty.store(true);
     }
+
+    // These name sets describe currently loaded mods, not every mod ever
+    // observed in this process. A mod removed and later replaced may no
+    // longer ship its previous UI files or DLL shim dependency.
+    auto pruneOwners = [](char (*owners)[kNameMax], int& count)
+    {
+        int remaining = 0;
+
+        for (int i = 0; i < count; ++i)
+        {
+            bool loaded = false;
+
+            for (int j = 0; j < g_loadedCount && !loaded; ++j)
+                loaded = EqualsNoCase(owners[i], g_loaded[j]);
+
+            if (!loaded)
+                continue;
+
+            if (remaining != i)
+                memcpy(owners[remaining], owners[i], kNameMax);
+
+            ++remaining;
+        }
+
+        if (remaining != count)
+        {
+            count = remaining;
+            g_modsLuaDirty.store(true);
+        }
+    };
+
+    pruneOwners(g_uiMods, g_uiModCount);
+    pruneOwners(g_dllMods, g_dllModCount);
 }
 
 static int StackIndexOfZone(const char* zone)
@@ -1608,7 +1644,12 @@ static int StackIndexOfZone(const char* zone)
 
 static bool ScriptBase(const char* name, char* base, size_t size)
 {
-    const size_t n = strlen(name);
+    size_t n = 0;
+
+    // A script asset's name is game-managed memory, not necessarily a valid
+    // NUL-terminated string. Do not let strlen cross an unreadable page.
+    if (!SafeReadableCString((uintptr_t)name, size, &n))
+        return false;
 
     if (n < 5 || n + 4 > size || name[n - 4] != '.' ||
         (!EqualsNoCase(name + n - 3, "gsc") && !EqualsNoCase(name + n - 3, "csc")))
@@ -1626,7 +1667,7 @@ static void ClaimStackScript(uintptr_t header, int index)
     const char* const name = *(const char* const*)header;
     char base[kInternedMax];
 
-    if (!name || !RangeReadable((uintptr_t)name, 1) || !ScriptBase(name, base, sizeof(base)))
+    if (!ScriptBase(name, base, sizeof(base)))
         return;
 
     int owner = -1;
@@ -1699,11 +1740,11 @@ static bool LoadsOvercharged(uintptr_t header)
 static void NoteUiFile(uintptr_t header, int index)
 {
     const char* const name = *(const char* const*)header;
+    size_t n = 0;
 
-    if (!name || !RangeReadable((uintptr_t)name, 4) || name[0] != 'u' || name[1] != 'i')
+    if (!name || !RangeReadable((uintptr_t)name, 2) || name[0] != 'u' || name[1] != 'i' ||
+        !SafeReadableCString((uintptr_t)name, sizeof(g_modUiFiles[0]), &n))
         return;
-
-    const size_t n = strlen(name);
 
     if (n < 8 || !EqualsNoCase(name + n - 4, ".lua"))
         return;
@@ -1766,7 +1807,7 @@ static void RenameStackAsset(uint64_t asset)
 
     const char* const zone = (const char*)g_loadingZones.Current((uint64_t)scePthreadSelf());
 
-    if (!zone || !RangeReadable((uintptr_t)zone, 1))
+    if (!SafeReadableCString((uintptr_t)zone, kNameMax, nullptr))
         return;
 
     ListReader reading;
@@ -1803,7 +1844,8 @@ static void RenameStackAsset(uint64_t asset)
     bool localized = false;
     const char* const name = *(const char* const*)header;
 
-    if (ZoneKind(inner, &localized) < 0 || !name || !RangeReadable((uintptr_t)name, 1) || !EqualsNoCase(name, inner))
+    if (ZoneKind(inner, &localized) < 0 || !SafeReadableCString((uintptr_t)name, kNameMax, nullptr) ||
+        !EqualsNoCase(name, inner))
         return;
 
     const char* slot = nullptr;
@@ -2000,14 +2042,29 @@ static uint64_t XPakOpen_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, u
     const char* const zone = (const char*)g_loadingZones.Current((uint64_t)scePthreadSelf());
     int index = -1;
     char inner[kNameMax];
+    size_t pakLength = 0;
 
-    if (pak && zone && RangeReadable((uintptr_t)pak, 1) && StackName(zone, &index, inner, sizeof(inner)))
+    // The Database thread may supply a name near the end of a readable mapping.
+    // A one-byte probe does not make later snprintf/strlen accesses safe.
+    const bool readablePak = pak && zone && SafeReadableCString((uintptr_t)pak, kNameMax, &pakLength);
+    const bool readableZone = readablePak && SafeReadableCString((uintptr_t)zone, kNameMax, nullptr);
+#ifdef _DEBUG
+    if (pak && zone && (!readablePak || !readableZone))
+    {
+        static std::atomic<uint32_t> g_unsafeXpakReports{0};
+        if (g_unsafeXpakReports.fetch_add(1, std::memory_order_relaxed) < 4)
+            T7Log_Write("[ModLoad] xpak remap ignored unsafe text (pak=%p zone=%p)", (const void*)pak,
+                        (const void*)zone);
+    }
+#endif
+
+    if (readableZone && StackName(zone, &index, inner, sizeof(inner)))
     {
         ListReader reading;
         char file[kNameMax + 8];
         snprintf(file, sizeof(file), "%s.xpak", pak);
 
-        if (index > 0 && index < g_stackCount && strlen(pak) < kNameMax && StackFileIn(g_stack[index], file, false))
+        if (pakLength && index > 0 && index < g_stackCount && StackFileIn(g_stack[index], file, false))
         {
             char* const name = g_xpakNames[g_xpakNameAt.fetch_add(1) % kXpakNames];
 
@@ -3608,23 +3665,54 @@ static int AddModZones(const ZoneInfo* zones, int count, ZoneInfo* out)
         return 0;
     }
 
-    BeginListWrite();
-    SetStack(names, wanted);
-    EndListWrite();
+    // Planning uses the global stack to resolve zone companions and paths.
+    // A request can produce zero zones even when recordsAvailable > 0 (for
+    // example a mod with no zones for this mode, or too few companion slots).
+    // Preserve the *exact* active stack until the new plan has entries.
+    const int previousCount = g_stackCount;
+    StackMod* previous = nullptr;
 
+    if (previousCount > 0)
+    {
+        previous = (StackMod*)malloc((size_t)previousCount * sizeof(StackMod));
+
+        if (!previous)
+        {
+            T7Log_Write("[Mods] cannot save the active stack for %s; retaining loaded mods", k_modeCommons[mode]);
+            return 0;
+        }
+    }
+
+    BeginListWrite();
+
+    if (previous)
+        memcpy(previous, g_stack, (size_t)previousCount * sizeof(StackMod));
+
+    SetStack(names, wanted);
     memcpy(out, zones, (size_t)count * sizeof(ZoneInfo));
     int records = recordsAvailable;
     int through = 0;
     const int added = StackEntries(0, mode, out + count, room, &records, &through);
 
+    if (added == 0)
+    {
+        if (previous)
+            memcpy(g_stack, previous, (size_t)previousCount * sizeof(StackMod));
+
+        g_stackCount = previousCount;
+    }
+
+    EndListWrite();
+    free(previous);
+
+    if (added == 0)
+        return 0;
+
     // A rejected stack (for example, no free zone records) must not erase
     // registrations owned by the mods that are still loaded. Claims are
     // replaced only when at least one new mod zone can actually be loaded.
-    if (added > 0)
-    {
-        ResetScriptClaims();
-        SetLoaded(through);
-    }
+    ResetScriptClaims();
+    SetLoaded(through);
 
     if (added > 0 && through < g_stackCount)
         g_applyWanted.store(true);
@@ -3684,6 +3772,8 @@ static void WaitForModZones(const ZoneInfo* zones, int count, int from)
     {
         g_reloadCheck = true;
         g_reloadSince = sceKernelGetProcessTime();
+        T7Log_Write("[ModLoad] tracking %d pending zone(s), starting at mod %d",
+                    g_waitZoneCount, g_waitFrom + 1);
     }
 }
 
@@ -3738,6 +3828,7 @@ static uint64_t LoadXAssets_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4
     const ZoneInfo* const zones = (const ZoneInfo*)a1;
     const int count = (int)(uint32_t)a2;
     const bool zombies = (*(const uint32_t*)(g_base + kSessionModes) & 0xF) == 0;
+    bool modDispatch = false;
 
     if (zones && count > 0 && count <= kMaxZoneCall)
     {
@@ -3797,8 +3888,17 @@ static uint64_t LoadXAssets_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4
         }
 
         for (int i = 0; i < count; ++i)
+        {
+            modDispatch = modDispatch || ((uint32_t)zones[i].allocFlags & kModMarker) != 0;
             T7Log_Zone(zones[i].name, zones[i].allocFlags, zones[i].freeFlags);
+        }
     }
+
+    const uint32_t dispatchId = modDispatch ? g_modDispatchSerial.fetch_add(1, std::memory_order_relaxed) + 1 : 0;
+
+    if (modDispatch)
+        T7Log_Write("[ModLoad] zone dispatch #%u begin: %d zone(s), first %s", dispatchId, count,
+                    zones[0].name ? zones[0].name : "(unnamed)");
 
     int at = -1;
 
@@ -3839,11 +3939,21 @@ static uint64_t LoadXAssets_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4
         list[at].allocFlags |= kLevelCommonFlag;
         memcpy(list + at + 1, zones + at, (size_t)(count - at) * sizeof(ZoneInfo));
 
-        return ((Hook_t)g_loadOriginal)((uint64_t)list, (uint64_t)(count + 1), a3, a4, a5, a6, x0, x1, x2, x3, x4,
-                                         x5, x6, x7);
+        const uint64_t result = ((Hook_t)g_loadOriginal)((uint64_t)list, (uint64_t)(count + 1), a3, a4, a5, a6,
+                                                         x0, x1, x2, x3, x4, x5, x6, x7);
+
+        if (modDispatch)
+            T7Log_Write("[ModLoad] zone dispatch #%u dispatch returned; assets may still be loading", dispatchId);
+
+        return result;
     }
 
-    return ((Hook_t)g_loadOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
+    const uint64_t result = ((Hook_t)g_loadOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
+
+    if (modDispatch)
+        T7Log_Write("[ModLoad] zone dispatch #%u dispatch returned; assets may still be loading", dispatchId);
+
+    return result;
 }
 
 static int SessionModeCommon()
@@ -3876,8 +3986,29 @@ static void ClearAssetsInUse()
 static void AppendMods(const char (*names)[kNameMax], int wanted, int mode)
 {
     const int from = g_loadedCount;
+    T7Log_Write("[ModLoad] append requested: %d loaded, %d wanted, common %s", from, wanted, k_modeCommons[mode]);
+
+    // SetStack also populates the file redirects. If the new zones cannot fit,
+    // those redirects must not point at mods that never actually loaded.
+    const int previousCount = g_stackCount;
+    StackMod* previous = nullptr;
+
+    if (previousCount > 0)
+    {
+        previous = (StackMod*)malloc((size_t)previousCount * sizeof(StackMod));
+
+        if (!previous)
+        {
+            T7Log_Write("[Mods] cannot save the active stack before appending; leaving loaded mods unchanged");
+            return;
+        }
+    }
 
     BeginListWrite();
+
+    if (previous)
+        memcpy(previous, g_stack, (size_t)previousCount * sizeof(StackMod));
+
     SetStack(names, wanted);
     EndListWrite();
 
@@ -3915,8 +4046,33 @@ static void AppendMods(const char (*names)[kNameMax], int wanted, int mode)
         at = through;
     }
 
+    if (g_loadedCount < g_stackCount)
+    {
+        BeginListWrite();
+
+        if (g_loadedCount == from)
+        {
+            if (previous)
+                memcpy(g_stack, previous, (size_t)previousCount * sizeof(StackMod));
+
+            g_stackCount = previousCount;
+        }
+        else
+        {
+            // A prefix loaded successfully; the remaining chosen mods did not.
+            g_stackCount = g_loadedCount;
+        }
+
+        EndListWrite();
+    }
+
+    free(previous);
+
     if (loads == 0 && g_loadedCount > from)
         T7Log_Write("[Mods] the newly ticked mods have nothing for %s", k_modeCommons[mode]);
+
+    T7Log_Write("[ModLoad] append returned: %d loaded, %d batch(es) dispatched, %d stack entries",
+                g_loadedCount, loads, g_stackCount);
 }
 
 static void ApplyModsBeforeLevel(const char* level)
@@ -4012,6 +4168,39 @@ static bool AnyZoneLoading()
     }
 
     return false;
+}
+
+static bool TrackedModZonesPending()
+{
+    if (!g_reloadCheck)
+        return false;
+
+    // The engine's global "loading" state can be clear before every zone
+    // scheduled by the previous mod selection has become ready. Never append
+    // another mod during that gap: its redirects and script claims depend on
+    // the earlier stack having finished linking.
+    for (int i = 0; i < g_waitZoneCount; ++i)
+    {
+        if (ZoneStateOf(g_waitZones[i]) < 2)
+            return true;
+    }
+
+    return false;
+}
+
+static void TraceModWait(bool& wasDeferred, bool engineBusy, bool trackedPending, const char* action)
+{
+    const bool deferred = engineBusy || trackedPending;
+
+    // The frame hook retries queued requests every frame. Record state
+    // transitions rather than flooding log.txt with identical messages.
+    if (deferred == wasDeferred)
+        return;
+
+    wasDeferred = deferred;
+    T7Log_Write("[ModLoad] %s %s: engine busy %d, tracked pending %d, tracked zones %d, loaded mods %d",
+                action, deferred ? "deferred" : "resumed", engineBusy ? 1 : 0, trackedPending ? 1 : 0,
+                g_waitZoneCount, g_loadedCount);
 }
 
 static const char* RecordZoneName(int32_t record)
@@ -4158,9 +4347,22 @@ static void ReloadFrontend(const char* why)
 
     T7Log_Write("[Mods] %s; reloading the menus the way PC does after a mod change", why);
 
-    g_quietReload = g_playMovieOriginal != nullptr;
-    ((void (*)(uint64_t))(g_base + kKillServer))(0);
-    g_quietReload = false;
+    // KillServer may synchronously invoke callbacks that reload the frontend
+    // again. The inner call must not clear the outer call's movie suppression.
+    struct QuietReloadScope
+    {
+        bool previous;
+        explicit QuietReloadScope(bool enabled) : previous(g_quietReload)
+        {
+            g_quietReload = previous || enabled;
+        }
+        ~QuietReloadScope() { g_quietReload = previous; }
+    };
+
+    {
+        QuietReloadScope quiet(g_playMovieOriginal != nullptr);
+        ((void (*)(uint64_t))(g_base + kKillServer))(0);
+    }
     g_unshownCount = 0;
 }
 
@@ -4215,8 +4417,14 @@ static void LoadModeCommonForMods()
         SessionModeOverride& operator=(const SessionModeOverride&) = delete;
     };
 
-    SessionModeOverride zombiesMode(session, 0);
-    LoadXAssets_h((uint64_t)&common, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    {
+        SessionModeOverride zombiesMode(session, 0);
+        T7Log_Write("[ModLoad] mode common dispatch begin: %s, session 0x%X -> 0x%X", common.name, saved, *session);
+        LoadXAssets_h((uint64_t)&common, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        T7Log_Write("[ModLoad] mode common dispatch returned: %s; assets may still be loading", common.name);
+    }
+
+    T7Log_Write("[ModLoad] mode common scope exited: session restored to 0x%X", *session);
 }
 
 static bool IsUnshown(const char* name)
@@ -4285,7 +4493,11 @@ static void PrefetchMods()
     if (!g_loadOriginal || !ModHooksReady() || g_inLevel)
         return;
 
-    if (AnyZoneLoading())
+    const bool engineBusy = AnyZoneLoading();
+    const bool trackedPending = TrackedModZonesPending();
+    TraceModWait(g_prefetchDeferred, engineBusy, trackedPending, "prefetch");
+
+    if (engineBusy || trackedPending)
     {
         g_prefetchWanted.store(true);
         return;
@@ -4335,7 +4547,11 @@ static void ApplyModsNow()
     if (!g_loadOriginal || !ModHooksReady() || g_inLevel)
         return;
 
-    if (AnyZoneLoading())
+    const bool engineBusy = AnyZoneLoading();
+    const bool trackedPending = TrackedModZonesPending();
+    TraceModWait(g_applyDeferred, engineBusy, trackedPending, "apply");
+
+    if (engineBusy || trackedPending)
     {
         g_applyWanted.store(true);
         return;
@@ -5196,24 +5412,30 @@ static void FindPreview(Package& package, const char* json)
 
     char thumbnail[260];
 
-    if (!json || !JsonString(json, "Thumbnail", thumbnail, sizeof(thumbnail)))
-        return;
-
-    const char* file = thumbnail;
-
-    for (const char* c = thumbnail; *c; ++c)
+    if (json && JsonString(json, "Thumbnail", thumbnail, sizeof(thumbnail)))
     {
-        if (*c == '/' || *c == '\\')
-            file = c + 1;
+        const char* file = thumbnail;
+
+        for (const char* c = thumbnail; *c; ++c)
+        {
+            if (*c == '/' || *c == '\\')
+                file = c + 1;
+        }
+
+        const size_t length = strlen(file);
+
+        if (length > 4 && length < sizeof(package.preview) && EqualsNoCase(file + length - 4, ".png") &&
+            FindPackageFile(package, file, path, sizeof(path)))
+        {
+            memcpy(package.preview, file, length + 1);
+            return;
+        }
     }
 
-    const size_t length = strlen(file);
-
-    if (length <= 4 || length >= sizeof(package.preview) || !EqualsNoCase(file + length - 4, ".png"))
-        return;
-
-    if (FindPackageFile(package, file, path, sizeof(path)))
-        snprintf(package.preview, sizeof(package.preview), "%s", file);
+    // A valid loading image is better than a blank white selection tile when
+    // a usermap ships without a dedicated previewimage.png.
+    if (FindPackageFile(package, "loadingimage.png", path, sizeof(path)))
+        snprintf(package.preview, sizeof(package.preview), "loadingimage.png");
 }
 
 static bool AllDigits(const char* text);
@@ -6313,6 +6535,7 @@ bool T7Maps_Refresh()
     BeginListWrite();
     ScanAll();
     EndListWrite();
+    T7MapImages_RefreshMisses();
 
     if (g_packageCount || g_modCount)
         InstallHooks(g_base);
@@ -6441,6 +6664,20 @@ bool T7Maps_MapFile(const char* map, const char* file, char* path, size_t size)
     ListReader reading;
     const int package = g_base && map && file ? MapPackage(map) : -1;
     return package >= 0 && FindPackageFile(g_packages[package], file, path, size);
+}
+
+bool T7Maps_MapPreviewPath(const char* map, char* path, size_t size)
+{
+    using namespace T7Maps;
+
+    if (!path || !size)
+        return false;
+
+    path[0] = 0;
+    ListReader reading;
+    const int package = g_base && map ? MapPackage(map) : -1;
+    return package >= 0 && g_packages[package].preview[0] &&
+           FindPackageFile(g_packages[package], g_packages[package].preview, path, size);
 }
 
 bool T7Maps_ModPreviewFile(uint32_t key, char* path, size_t size)
@@ -6597,6 +6834,7 @@ void T7Maps_FrameWork()
     if (ready != g_readyZones)
     {
         g_readyZones = ready;
+        T7Log_Write("[ModLoad] zones ready %d/%d; menu held %d", ready, g_waitZoneCount, g_reloadHeld ? 1 : 0);
         g_modsLuaDirty.store(true);
     }
 

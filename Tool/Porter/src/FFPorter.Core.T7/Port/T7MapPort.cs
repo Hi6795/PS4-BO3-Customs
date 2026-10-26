@@ -139,9 +139,7 @@ public static class T7MapPort
         }
         files.AddRange(companions.SoundBanks);
         string[] roots = UsermapRoots(folder);
-        var package = new List<string>();
-        foreach (string relative in UsermapFiles)
-            package.AddRange(roots.Select(root => Path.Combine(root, relative)).Where(File.Exists));
+        var package = UsermapPackageFiles(roots).Select(item => item.Source).ToList();
         if (IsUsermap(folder, roots) && VideoFolder(roots) is { } videos)
             package.AddRange(Directory.EnumerateFiles(videos).Where(file => T7MovieTranscoder.Extensions.Contains(Path.GetExtension(file))));
         return new Originals(files, package, roots[^1]);
@@ -513,13 +511,66 @@ public static class T7MapPort
         roots.Any(root => File.Exists(Path.Combine(root, "workshop.json")))
         || Path.GetFullPath(folder).Split(Path.DirectorySeparatorChar).Contains("usermaps", StringComparer.OrdinalIgnoreCase);
 
-    private static void CopyUsermapFiles(T7MapPortOptions options, string[] roots, Collected collected)
+    // PC maps can reference a custom PNG in workshop.json instead of
+    // previewimage.png. The console's map menu resolves its basename.
+    internal static string? WorkshopThumbnail(string manifest)
+    {
+        try
+        {
+            FileInfo file = new(manifest);
+            if (!file.Exists || file.Length <= 0 || file.Length > 64 * 1024)
+                return null;
+
+            using JsonDocument json = JsonDocument.Parse(File.ReadAllText(manifest));
+            if (json.RootElement.ValueKind != JsonValueKind.Object ||
+                !json.RootElement.TryGetProperty("Thumbnail", out JsonElement field) ||
+                field.ValueKind != JsonValueKind.String)
+                return null;
+
+            string name = field.GetString() ?? "";
+            int slash = name.LastIndexOfAny(['/', '\\']);
+            name = name[(slash + 1)..];
+            // The SPRX package index stores preview filenames in 96 bytes.
+            if (name.Length is < 5 or > 95 || name.StartsWith('.') ||
+                !name.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ||
+                name.Any(c => char.IsControl(c) || c is '/' or '\\' or ':'))
+                return null;
+
+            return name;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static IEnumerable<(string Source, string Name)> UsermapPackageFiles(string[] roots)
     {
         foreach (string relative in UsermapFiles)
         {
-            string? source = roots.Select(root => Path.Combine(root, relative)).FirstOrDefault(File.Exists);
-            if (source == null)
-                continue;
+            string? file = roots.Select(root => Path.Combine(root, relative)).FirstOrDefault(File.Exists);
+            if (file != null)
+                yield return (file, relative);
+        }
+
+        // Do not copy an unused alternative when the standard preview wins.
+        if (roots.Any(root => File.Exists(Path.Combine(root, "previewimage.png"))))
+            yield break;
+
+        string? manifest = roots.Select(root => Path.Combine(root, "workshop.json")).FirstOrDefault(File.Exists);
+        string? thumbnail = manifest == null ? null : WorkshopThumbnail(manifest);
+        if (thumbnail == null || UsermapFiles.Contains(thumbnail, StringComparer.OrdinalIgnoreCase))
+            yield break;
+
+        string? image = roots.Select(root => Path.Combine(root, thumbnail)).FirstOrDefault(File.Exists);
+        if (image != null)
+            yield return (image, thumbnail);
+    }
+
+    private static void CopyUsermapFiles(T7MapPortOptions options, string[] roots, Collected collected)
+    {
+        foreach ((string source, string relative) in UsermapPackageFiles(roots))
+        {
             string target = Path.Combine(options.OutputFolder, relative);
             CacheFiles.Copy(source, target);
             collected.AddOutput(target);

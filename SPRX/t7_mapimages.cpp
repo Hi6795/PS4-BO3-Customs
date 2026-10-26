@@ -22,6 +22,8 @@ constexpr int      kImageFlags    = 4;
 constexpr int      kMaxElements   = 0x4E20;
 constexpr int      kMaxPictures   = 128;
 constexpr size_t   kMaxFileBytes  = 48u * 1024 * 1024;
+constexpr uint32_t kMaxFailureLogs = 64;
+constexpr uint64_t kImageRetryDelayUs = 5u * 1000 * 1000;
 
 constexpr int kPreviewWidth  = 640;
 constexpr int kPreviewHeight = 352;
@@ -59,11 +61,15 @@ struct Picture
 {
     char name[96];
     uint64_t image;
+    uint32_t attemptEpoch;
+    uint64_t retryAfter;
 };
 
 static uintptr_t g_base = 0;
 static Picture   g_pictures[kMaxPictures];
 static int       g_pictureCount = 0;
+static std::atomic<uint32_t> g_pictureEpoch{1};
+static std::atomic<uint32_t> g_failureLogs{0};
 
 static Detour g_registerDetour{};
 static void*  g_registerOriginal = nullptr;
@@ -93,19 +99,54 @@ static bool IsMapToken(const char* name)
     return n > 0;
 }
 
-static uint8_t* ReadWholeFile(const char* path, size_t* outSize)
+static void LogImageFailure(const char* name, const char* reason, const char* path)
 {
-    SceKernelStat st;
+    const uint32_t index = g_failureLogs.fetch_add(1, std::memory_order_relaxed);
 
-    if (sceKernelStat(path, &st) != 0 || st.st_size <= 0 || (size_t)st.st_size > kMaxFileBytes)
-        return nullptr;
+    if (index < kMaxFailureLogs)
+        T7Log_Write("[MapImages] FAILED %s: %s%s%s (will use $white)", name, reason,
+                    path ? " | file: " : "", path ? path : "");
+    else if (index == kMaxFailureLogs)
+        T7Log_Write("[MapImages] further image failure details suppressed after %u entries", kMaxFailureLogs);
+}
 
+static uint8_t* ReadWholeFile(const char* path, size_t* outSize, const char** reason)
+{
     const int fd = sceKernelOpen(path, SCE_KERNEL_O_RDONLY, 0);
 
     if (fd < 0)
+    {
+        *reason = "file open failed";
         return nullptr;
+    }
 
-    const size_t size = (size_t)st.st_size;
+    // OpenOrbis v0.5.4's struct stat does not match the PS4 kernel layout.
+    // In particular, its st_size can truncate valid PNG files before Png_Open.
+    // Query the descriptor directly instead of trusting sceKernelStat metadata.
+    const off_t fileSize = sceKernelLseek(fd, 0, SEEK_END);
+
+    if (fileSize < 0)
+    {
+        sceKernelClose(fd);
+        *reason = "image file size seek failed";
+        return nullptr;
+    }
+
+    if (fileSize == 0 || (uint64_t)fileSize > kMaxFileBytes)
+    {
+        sceKernelClose(fd);
+        *reason = "empty or oversized image file";
+        return nullptr;
+    }
+
+    if (sceKernelLseek(fd, 0, SEEK_SET) != 0)
+    {
+        sceKernelClose(fd);
+        *reason = "image file rewind seek failed";
+        return nullptr;
+    }
+
+    const size_t size = (size_t)fileSize;
     uint8_t* const data = (uint8_t*)malloc(size);
     size_t done = 0;
 
@@ -123,7 +164,9 @@ static uint8_t* ReadWholeFile(const char* path, size_t* outSize)
 
     if (!data || done != size)
     {
+        const bool allocated = data != nullptr;
         free(data);
+        *reason = allocated ? "incomplete image file read" : "image allocation failed";
         return nullptr;
     }
 
@@ -149,7 +192,8 @@ static uint8_t* PixelMemory(uint64_t image)
     return (uint8_t*)pixels;
 }
 
-static bool WritePicture(const PngImage& picture, uint8_t* pixels, int width, int height, int pitch)
+static bool WritePicture(const PngImage& picture, uint8_t* pixels, int width, int height, int pitch,
+                         const char** reason)
 {
     const int64_t across = (int64_t)picture.width * height;
     const int64_t down = (int64_t)picture.height * width;
@@ -157,7 +201,7 @@ static bool WritePicture(const PngImage& picture, uint8_t* pixels, int width, in
     memset(pixels, 0, (size_t)pitch * 4 * (size_t)height);
 
     if (across * 10 >= down * 9 && across * 9 <= down * 10)
-        return Png_Scale(picture, pixels, width, height, (size_t)pitch * 4, nullptr);
+        return Png_Scale(picture, pixels, width, height, (size_t)pitch * 4, reason);
 
     int fitWidth = width;
     int fitHeight = height;
@@ -174,7 +218,7 @@ static bool WritePicture(const PngImage& picture, uint8_t* pixels, int width, in
     const int top = (height - fitHeight) / 2;
 
     return Png_Scale(picture, pixels + ((size_t)top * (size_t)pitch + (size_t)left) * 4, fitWidth, fitHeight,
-                     (size_t)pitch * 4, nullptr);
+                     (size_t)pitch * 4, reason);
 }
 
 static void ReleaseImage(uint64_t image)
@@ -211,26 +255,36 @@ static uint64_t MakePicture(const char* name)
     const bool mod = strncmp(name, T7_MOD_PREVIEW_PREFIX, sizeof(T7_MOD_PREVIEW_PREFIX) - 1) == 0;
     const bool preview = mod || strncmp(name, T7_USERMAP_PREVIEW_PREFIX, sizeof(T7_USERMAP_PREVIEW_PREFIX) - 1) == 0;
     const char* const map = name + (preview ? sizeof(T7_USERMAP_PREVIEW_PREFIX) : sizeof(T7_USERMAP_LOADING_PREFIX)) - 1;
-    const char* const previewFile = preview && !mod ? T7Maps_PreviewFile(map) : nullptr;
-    const char* const file = preview ? (previewFile ? previewFile : "previewimage.png") : "loadingimage.png";
     const int width = preview ? kPreviewWidth : kLoadingWidth;
     const int height = preview ? kPreviewHeight : kLoadingHeight;
 
     char path[320];
 
-    if (mod ? !ModPicturePath(name, path, sizeof(path)) : !IsMapToken(map) || !T7Maps_MapFile(map, file, path, sizeof(path)))
+    const bool found = mod ? ModPicturePath(name, path, sizeof(path)) :
+                       IsMapToken(map) && (preview ? T7Maps_MapPreviewPath(map, path, sizeof(path)) :
+                                                      T7Maps_MapFile(map, "loadingimage.png", path, sizeof(path)));
+
+    if (!found)
+    {
+        LogImageFailure(name, "preview path not found in package registry", nullptr);
         return 0;
+    }
 
     size_t size = 0;
-    uint8_t* const png = ReadWholeFile(path, &size);
+    const char* reason = nullptr;
+    uint8_t* const png = ReadWholeFile(path, &size, &reason);
 
     if (!png)
+    {
+        LogImageFailure(name, reason ? reason : "image file read failed", path);
         return 0;
+    }
 
     PngImage picture;
 
-    if (!Png_Open(png, size, &picture, nullptr))
+    if (!Png_Open(png, size, &picture, &reason))
     {
+        LogImageFailure(name, reason ? reason : "PNG header rejected", path);
         free(png);
         return 0;
     }
@@ -240,6 +294,7 @@ static uint64_t MakePicture(const char* name)
 
     if (!image)
     {
+        LogImageFailure(name, "game dynamic image allocation failed", path);
         free(png);
         return 0;
     }
@@ -254,20 +309,27 @@ static uint64_t MakePicture(const char* name)
     if (!pixels || imageWidth != width || imageHeight != height || pitch < width || pitch > width + 64 ||
         (uint64_t)pitch * 4 * (uint64_t)height > bytes)
     {
+        LogImageFailure(name, !pixels ? "GPU image pixel memory unavailable" :
+                        imageWidth != width || imageHeight != height ? "game image dimensions mismatch" :
+                        pitch < width || pitch > width + 64 ? "unsupported game image row pitch" :
+                        "game image buffer too small", path);
         free(png);
         ReleaseImage(image);
         return 0;
     }
 
-    const bool written = WritePicture(picture, pixels, width, height, pitch);
+    reason = nullptr;
+    const bool written = WritePicture(picture, pixels, width, height, pitch, &reason);
     free(png);
 
     if (!written)
     {
+        LogImageFailure(name, reason ? reason : "PNG decoding or scaling failed", path);
         ReleaseImage(image);
         return 0;
     }
 
+    T7Log_Write("[MapImages] loaded %s (%dx%d) from %s", name, width, height, path);
     return image;
 }
 
@@ -300,6 +362,14 @@ static bool StillOurs(const Picture& picture)
 
 static uint64_t PictureFor(const char* name)
 {
+    const uint32_t epoch = g_pictureEpoch.load(std::memory_order_relaxed);
+    const auto attempt = [epoch](Picture& picture)
+    {
+        picture.image = MakePicture(picture.name);
+        picture.attemptEpoch = epoch;
+        picture.retryAfter = picture.image ? 0 : sceKernelGetProcessTime() + kImageRetryDelayUs;
+    };
+
     for (int i = 0; i < g_pictureCount; ++i)
     {
         Picture& picture = g_pictures[i];
@@ -308,17 +378,27 @@ static uint64_t PictureFor(const char* name)
             continue;
 
         if (picture.image && !StillOurs(picture))
-            picture.image = MakePicture(name);
+        {
+            attempt(picture);
+        }
+        else if (!picture.image &&
+                 (picture.attemptEpoch != epoch || sceKernelGetProcessTime() >= picture.retryAfter))
+        {
+            attempt(picture);
+        }
 
         return picture.image;
     }
 
     if (g_pictureCount >= kMaxPictures || strlen(name) >= sizeof(g_pictures[0].name))
+    {
+        LogImageFailure(name, "custom image cache full or name too long", nullptr);
         return 0;
+    }
 
     Picture& picture = g_pictures[g_pictureCount];
     snprintf(picture.name, sizeof(picture.name), "%s", name);
-    picture.image = MakePicture(name);
+    attempt(picture);
     ++g_pictureCount;
     return picture.image;
 }
@@ -422,6 +502,13 @@ static bool Matches(uintptr_t base, uintptr_t offset, const uint8_t* bytes, size
 }
 }
 
+void T7MapImages_RefreshMisses()
+{
+    // Existing GPU images remain live. Only failed image registrations are
+    // retried when the menu next asks for them after a map rescan.
+    T7MapImages::g_pictureEpoch.fetch_add(1, std::memory_order_relaxed);
+}
+
 void T7MapImages_Install(uintptr_t base)
 {
     using namespace T7MapImages;
@@ -433,21 +520,47 @@ void T7MapImages_Install(uintptr_t base)
 
     installed = true;
 
-    if (!Matches(base, kRegisterImage, k_registerImage, sizeof(k_registerImage)) ||
-        !Matches(base, kSetImage, k_setImage, sizeof(k_setImage)) ||
-        !Matches(base, kDynamicImage, k_dynamicImage, sizeof(k_dynamicImage)) ||
-        !Matches(base, kFindAsset, k_findAsset, sizeof(k_findAsset)))
+    if (!Matches(base, kRegisterImage, k_registerImage, sizeof(k_registerImage)))
+    {
+        T7Log_Write("[MapImages] DISABLED: register-image signature mismatch");
         return;
+    }
+
+    if (!Matches(base, kSetImage, k_setImage, sizeof(k_setImage)))
+    {
+        T7Log_Write("[MapImages] DISABLED: set-image signature mismatch");
+        return;
+    }
+
+    if (!Matches(base, kDynamicImage, k_dynamicImage, sizeof(k_dynamicImage)))
+    {
+        T7Log_Write("[MapImages] DISABLED: dynamic-image signature mismatch");
+        return;
+    }
+
+    if (!Matches(base, kFindAsset, k_findAsset, sizeof(k_findAsset)))
+    {
+        T7Log_Write("[MapImages] DISABLED: find-asset signature mismatch");
+        return;
+    }
 
     g_base = base;
 
     Detour_Attach(&g_setImageDetour, (uint64_t)(base + kSetImage), (void*)SetImage_h, &g_setImageOriginal);
 
     if (!g_setImageOriginal)
+    {
+        T7Log_Write("[MapImages] DISABLED: set-image detour failed");
         return;
+    }
 
     Detour_Attach(&g_registerDetour, (uint64_t)(base + kRegisterImage), (void*)RegisterImage_h, &g_registerOriginal);
 
     if (!g_registerOriginal)
+    {
+        T7Log_Write("[MapImages] DISABLED: register-image detour failed");
         return;
+    }
+
+    T7Log_Write("[MapImages] hooks installed; custom preview loading enabled");
 }

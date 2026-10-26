@@ -25,6 +25,9 @@ char* T7Maps_CustomMapsLuaSnapshot();
 
 bool T7Maps_MapFile(const char* map, const char* file, char* path, size_t size);
 
+// Copy the resolved preview path while the package registry is protected.
+bool T7Maps_MapPreviewPath(const char* map, char* path, size_t size);
+
 const char* T7Maps_PreviewFile(const char* map);
 
 bool T7Maps_ModPreviewFile(uint32_t key, char* path, size_t size);

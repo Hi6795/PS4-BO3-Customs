@@ -1,5 +1,6 @@
 #include "headers.hpp"
 #include "t7_log.hpp"
+#include "version.hpp"
 
 #ifdef _DEBUG
 
@@ -1226,7 +1227,11 @@ void T7Log_Install(uintptr_t base)
         scePthreadDetach(writer);
     }
 
-    T7Log_Write("BO3-Customs debug log (Debug build of %s %s)", __DATE__, __TIME__);
+    // Keep the build identity and timestamp in the SAME queued entry: an
+    // isolated missing line must not make a hardware report ambiguous.
+    T7Log_Write("BO3-Customs debug log (Debug build of %s %s) | SPRX version %s; source revision %s; "
+                "diagnostic schema %d; target BO3 1.33", __DATE__, __TIME__, BO3_CUSTOMS_SPRX_VERSION,
+                BO3_CUSTOMS_SOURCE_REV, BO3_CUSTOMS_DIAGNOSTIC_SCHEMA);
     T7Log_Write("[Log] running on a %s; lines also go to %s", IsPs5() ? "PS5" : "PS4",
                 DebugSink() ? DebugSink() : "this file only");
 

@@ -1,4 +1,154 @@
-# Detour host regression checks
+# SPRX host regressions
+
+## Transactional mod-zone planning regression (issues #2 and #5)
+
+Run `python3 SPRX/tests/mod_stack_transaction_checks.py` on a Linux host with
+Python 3 and a C++20 compiler. The test compiles the production `AddModZones`
+body against deterministic planning and state fixtures. It first confirms that
+a mod request yielding zero loadable zones incorrectly overwrote the active
+stack's file/zone metadata in the previous revision. It then checks empty-mode
+requests, insufficient companion-record capacity, total capacity rejection,
+first-load rejection, rejected append, partial append, and successful replacement.
+Failed plans must leave the exact active stack, loaded names and script claims
+unchanged. Successful partial appends must not expose files from unplanned mods.
+The production fix temporarily snapshots active stack metadata and rolls it back
+if no zones can be planned; allocation failure also retains the old stack.
+
+These are host boundary tests, not validation of BO3's actual asset allocation,
+script precaching, multiplayer interaction, or PS4 firmware behavior.
+
+## Sequential mod-loading readiness
+
+`python3 SPRX/tests/mod_load_readiness_checks.py` exercises the production
+readiness gate for outstanding mod zones. Selecting another mod must defer
+while any previously scheduled zone is absent or still loading, even if the
+engine's global loading flag briefly reports no active zone. The check also
+verifies both menu prefetch and explicit apply retry after deferral. It does
+not reproduce or identify the cause of a console application crash.
+
+## Bounded script-asset metadata (issues #2 and #5)
+
+`ASAN_OPTIONS=detect_leaks=0 python3 SPRX/tests/script_asset_name_safety_checks.py`
+extracts the actual GSC/CSC script-name parser and Lua raw-file registration
+path. Before the repair, a four-byte unterminated name immediately before an
+unreadable memory page crashed in `ScriptBase`'s unbounded `strlen`. The code
+now validates each full script/Lua name with the existing bounded readable
+C-string primitive before parsing or logging it. The zone and key/value asset
+name comparisons use the same boundary check. The host regression covers valid
+case-insensitive script names, valid Lua registrations, unterminated names,
+overlong names and guard pages under ASan/UBSan. This fixes a proven runtime
+memory-safety hazard in script registration; it does **not** prove that the
+reported zombiebots script errors were caused by this mechanism.
+
+## Versioned, bounded diagnostics
+
+The SPRX version and diagnostic schema are defined in `SPRX/version.hpp`.
+Debug logs start with the version, source revision and compiler build time.
+As of `4.00.1-dev.5`, these identifiers occupy the same first line, so a
+single missing queued log entry cannot separate the version from the build
+timestamp. Diagnostic schema 3 also reports image-hook installation outcomes
+and bounded thumbnail failure reasons.
+Hosted native builds embed the Git revision and mark modified trees, while
+manual builds fall back to their stamped build time. The startup notification
+shows the SPRX version separately from the unchanged Console.zip release.
+
+`python3 SPRX/tests/mod_diagnostics_checks.py` extracts the production
+defer/resume trace helper and verifies that ten thousand waiting frames yield
+one message, followed by a single resume message. The source checks also
+require zone-dispatch begin/return markers and readiness counts. A dispatch
+return only means the engine accepted the call, **not** that every asset has
+finished streaming. Debug log collection is still asynchronous and cannot
+guarantee a fatal exception will be recorded before the game exits.
+
+## Custom thumbnail failure diagnosis
+
+In `4.00.1-dev.6` private console logs, dozens of distinct maps failed PNG
+parsing with `a chunk runs past the end of the file` even though image hooks
+were installed. The shared failure path read a file length from OpenOrbis
+v0.5.4's `sceKernelStat` structure, whose layout is not binary-compatible with
+the PS4 kernel's `struct stat`. `4.00.1-dev.7` now determines the PNG byte
+length through `sceKernelLseek` on the open descriptor, rewinds and fully reads
+it, retaining the 48 MiB upper bound. It does not modify the SDK stat type:
+changing that typedef in isolation would conflict with prebuilt SDK libraries.
+`ASAN_OPTIONS=detect_leaks=0 python3 SPRX/tests/map_image_file_read_checks.py`
+extracts the exact reader and reproduces the old truncated-read bug using an
+intentionally incorrect stat length. It also covers one-byte partial reads,
+empty/oversized files, seek failures, read errors, size changes and FD cleanup.
+This confirms the host-side read correction; actual PS4/PS5 image display
+remains hardware-unverified.
+
+`ASAN_OPTIONS=detect_leaks=0 python3 SPRX/tests/map_icon_loading_checks.py`
+tests retry-after-refresh, valid-image retention, registry-protected preview
+lookup, and a maximum of 64 detailed image failures plus one suppression
+notice. The runtime emits `[MapImages] hooks installed` or a specific hook
+failure at startup. Failed custom PNGs report which step failed (path lookup,
+file access, PNG parsing/decoding, game allocation, or image-buffer validation).
+As of `4.00.1-dev.6`, custom maps missing their dedicated `previewimage.png`
+and any valid `workshop.json` thumbnail use an available `loadingimage.png` as
+their map-selection icon. Missing artwork or a transient GPU allocation failure
+is retried after five seconds of process time if the menu asks for it again,
+without repeatedly retrying every render; a map refresh also forces a retry.
+Use `ASAN_OPTIONS=detect_leaks=0 python3 SPRX/tests/png_fixture_checks.py`
+to confirm that the production PNG decoder accepts known-valid RGBA, RGB and
+grayscale pixel fixtures. When all candidate art is missing or a PNG cannot be
+decoded, the `$white` fallback is still used. Host regressions do **not** prove
+that all thumbnails display correctly on BO3 1.33 hardware: pixel uploads,
+image-hook offsets, and GPU visibility remain hardware-unverified. Use the
+schema 3 `[MapImages]` lines and an offending PNG if a white icon persists.
+Do not attribute the separate PS4 freeze to thumbnail loading without evidence.
+
+## Database-thread XPAK pointer boundary checks
+
+`ASAN_OPTIONS=detect_leaks=0 CXX=clang++-18 python3 SPRX/tests/xpak_pointer_safety_checks.py`
+extracts the actual `SafeReadableCString` implementation and runs it against
+invalid pointers, missing terminators, maximum-length names, and a string
+ending immediately before a protected memory page. Static checks ensure the
+XPAK detour validates both the requested XPAK name and the current zone name
+before using them as strings. This avoids a known unsafe read path in the
+hook; it does not establish the root cause of the private PS5 crash.
+
+## Custom-map selection icons and dynamic-image cache
+
+`ASAN_OPTIONS=detect_leaks=0 CXX=clang++-18 python3 SPRX/tests/map_icon_loading_checks.py`
+compiles the production icon cache and preview path lookup. It checks that
+missing image entries do not hammer the filesystem each UI draw, can retry
+after a map registry refresh, and do not discard still-valid GPU images.
+The preview filename is resolved while holding the map registry reader lock,
+so a concurrent rescan cannot invalidate its storage before path resolution.
+Actual console UI rendering and GPU texture lifetime still need hardware checks.
+
+## Session mode and frontend reload checks (issues #3 and #4)
+
+`python3 SPRX/tests/session_mode_override_checks.py` extracts the exact C++
+scope guard from `LoadModeCommonForMods` and checks nested mode transitions,
+unchanged upper session bits, and restoration during C++ stack unwinding.
+It does not prove that game engine callbacks cannot observe the temporary mode.
+
+`python3 SPRX/tests/frontend_reload_checks.py` compiles the production
+`ReloadFrontend` function with a deterministic synchronous KillServer callback.
+It covers not-ready and in-level no-ops, absent movie hooks, and 100 repeated
+frontend reloads, preserving loaded-mod and script-claim metadata while clearing
+transient UI state. The `4.00.1-dev.9` regression additionally makes KillServer
+re-enter `ReloadFrontend`; the inner callback must preserve the outer call's
+quiet-movie scope. The old boolean assignment cleared that scope too soon.
+It cannot simulate a real BO3 server shutdown or HKS reload.
+
+`python3 SPRX/tests/mod_ui_claim_pruning_checks.py SPRX/t7_maps.cpp` extracts
+the production UI registry pruner and checks that unloading a mod removes its
+Lua file registrations **and** its UI/DLL classification. Retaining the latter
+forever could cause incorrect behavior if the same mod folder was replaced by
+a version without those assets. A surviving mod's registrations must not be
+removed; repeatedly pruning is idempotent and names match case-insensitively.
+
+`python3 SPRX/tests/script_claim_lifecycle_checks.py` extracts the production
+script claim registration, partial-unload pruning and full reset routines. It
+checks two mods sharing GSC/CSC names, independent script ownership, reload of
+an overlapping mod, and preservation of interned names while game assets may
+still point to them. This only models ordered asset callbacks, not the engine's
+asynchronous linker; reversing callback order and PS4/PS5 runtime behavior
+remain separate acceptance checks for issues #2 and #5.
+
+## Detour host regression checks
 
 Run on x86-64 Linux with Python 3 and a C++17 compiler:
 

@@ -1,5 +1,10 @@
 Checks for the tool. Nothing here ships: the release profile publishes `src/FFPorter.Desktop.T7` only.
 
+On a system with the .NET 10 SDK, `python3 Tool/Porter/tests/map_thumbnail_checks.py`
+builds a small headless harness around the real `T7MapPort` thumbnail selection
+logic. It covers alternate `workshop.json` PNG names, standard-preview
+precedence, invalid JSON and malformed or oversized filenames.
+
 ```text
 run.cmd                      build everything and run every offline check
 run.cmd --only shell,ftp     run some of them: settings, cleanup, windows, ftp, community, pause, delete,

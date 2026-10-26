@@ -2,6 +2,34 @@
 
 Changes to the plugin (`BO3-Customs.sprx`) and the tool (PS4 .FF Porter). Newest first.
 
+## 4.00.1-dev.4 (unreleased source changes)
+
+- Restore missing custom-map icons after a map registry refresh: failed dynamic-image registrations can retry, while valid GPU images remain cached.
+- Resolve `workshop.json`-selected map preview filenames into copied paths under the package registry lock, rather than retaining a pointer into mutable package metadata.
+- Preserve conventional `previewimage.png` and `loadingimage.png` handling; log successfully decoded PNG previews in Debug logs.
+- Include alternate PNG thumbnails named by a map's `workshop.json` in PC conversion outputs, with bounded filename validation and traversal-safe basename handling.
+- Add sanitizer-backed C++ map icon tests and .NET workshop thumbnail/package-selection tests. Console.zip itself has not changed.
+
+These are host-verified code changes; custom-map icon rendering on physical PS4/PS5 hardware remains unverified.
+
+## 4.00.1-dev.3 (SPRX-only, unreleased)
+
+- Reject unreadable or unterminated XPAK and zone names before the Database-thread XPAK hook formats, searches or remaps them.
+- Limit name scans to verified readable memory, including names that terminate just before an inaccessible page; add a sanitizer-backed host regression for malformed pointers.
+- In Debug builds, log the first four unsafe XPAK input pairs with pointer addresses, without logging unvalidated strings or flooding the Database thread.
+- Preserve the bounded mod-load diagnostics from dev.2. This is defensive hardening inspired by a private crash report, **not** confirmation that the reported crash is fixed.
+
+The original crashing October 15 build has not been symbolicated, and PS5 runtime behavior remains hardware-unverified. Console.zip and converter release versions are unchanged.
+
+## 4.00.1-dev.2 (SPRX-only, unreleased)
+
+- Mark each SPRX Debug log with its version, source revision, build date and diagnostic schema; show the version in the startup notification.
+- Record mod-load dispatch begin/return, queued selection defer/resume, tracked zone counts and readiness changes without per-frame diagnostic flooding.
+- Keep a second mod queued until the previously tracked mod zones become ready, including gaps when the global engine loading flag is clear.
+- Add host regressions for the readiness gate and ten thousand deferred frames.
+
+This is a development build, not a new Console.zip or converter release. Actual console crash prevention is not yet verified.
+
 ## 4.00
 
 Everything since [v3.00][3.00].

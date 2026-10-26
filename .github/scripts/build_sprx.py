@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import subprocess
 import tarfile
@@ -16,6 +17,19 @@ from verify_sprx import verify
 ROOT = Path(__file__).resolve().parents[2]
 SOURCES = ("libjbc.cpp", "main.cpp", "platform.cpp", "Detour.cpp", "HDE64.c", "png.cpp", "t7_maps.cpp",
            "t7_mapimages.cpp", "t7_lua.cpp", "t7_kbm.cpp", "t7_log.cpp", "t7_config.cpp", "t7_share.cpp", "t7_builtins.cpp")
+
+
+def source_revision():
+    """Identify source in console logs, including uncommitted SPRX edits."""
+    try:
+        revision = subprocess.check_output(["git", "rev-parse", "--short=12", "HEAD"], cwd=ROOT,
+                                           stderr=subprocess.DEVNULL, text=True).strip()
+        status = subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=all", "--",
+                                          "SPRX", ".github/scripts/build_sprx.py"], cwd=ROOT,
+                                         stderr=subprocess.DEVNULL, text=True).strip()
+        return revision + ("-dirty" if status else "")
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return "source-archive"
 
 
 def sha256(path):
@@ -84,8 +98,15 @@ def build(configuration, tool_directory):
     inventory = {node.attrib["Include"] for node in project.iter() if node.tag.endswith("ClCompile") and "Include" in node.attrib}
     if inventory != set(SOURCES):
         raise ValueError("Native source inventory changed; update the hosted build too")
+    revision = source_revision()
+    version_header = (source / "version.hpp").read_text(encoding="utf-8")
+    match = re.search(r'^#define BO3_CUSTOMS_SPRX_VERSION "([^"]+)"$', version_header, re.MULTILINE)
+    schema = re.search(r'^#define BO3_CUSTOMS_DIAGNOSTIC_SCHEMA (\d+)$', version_header, re.MULTILINE)
+    if not match or not schema:
+        raise ValueError("SPRX version.hpp must define a version and diagnostic schema")
     common = ["--target=x86_64-pc-freebsd12-elf", "-fPIC", "-funwind-tables", "-Oz", "-D_POSIX_C_SOURCE=200809L",
-              "-DBO3_OPENORBIS=1", "-D_DEBUG" if configuration == "Debug" else "-DNDEBUG", "-isysroot", str(sdk),
+              "-DBO3_OPENORBIS=1", f'-DBO3_CUSTOMS_SOURCE_REV="{revision}"',
+              "-D_DEBUG" if configuration == "Debug" else "-DNDEBUG", "-isysroot", str(sdk),
               "-isystem", str(sdk / "include"), "-I", str(source / "openorbis/include"), "-I", str(source)]
     objects = output / "objects"
     objects.mkdir()
@@ -121,7 +142,8 @@ def build(configuration, tool_directory):
     with (output / "readoelf.txt").open("w") as stream:
         subprocess.run([str(inspector), "--all", str(oelf)], env=environment, stdout=stream, check=True)
     report = verify(elf, oelf, sprx, configuration)
-    report.update(dependencies=lock, compiler_versions=versions, translation_units=len(SOURCES),
+    report.update(sprx_version=match.group(1), diagnostic_schema=int(schema.group(1)), source_revision=revision,
+                  dependencies=lock, compiler_versions=versions, translation_units=len(SOURCES),
                   third_party_notices={"GoldHEN": (cache / "goldhen_license").read_text(),
                                        "OpenOrbis": (sdk / "LICENSE").read_text()})
     (output / "target-validation.json").write_text(json.dumps(report, indent=2) + "\n")
