@@ -7,7 +7,9 @@
 #include "HDE64.h"
 #include "Detour.hpp"
 
+#ifndef VM_PROT_ALL
 #define VM_PROT_ALL (PROT_READ | PROT_WRITE | PROT_EXEC)
+#endif
 
 #define DETOUR_REL32_RANGE 0x7FF00000ULL
 

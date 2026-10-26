@@ -168,16 +168,22 @@ static int Start()
     return 0;
 }
 
+#ifdef BO3_OPENORBIS
+#define BO3_PLUGIN_EXPORT __attribute__((visibility("default")))
+#else
+#define BO3_PLUGIN_EXPORT __declspec(dllexport)
+#endif
+
 extern "C"
 {
-__declspec(dllexport) const char* g_pluginName = "BO3-Customs";
+BO3_PLUGIN_EXPORT const char* g_pluginName = "BO3-Customs";
 
-__declspec(dllexport) int32_t plugin_load(int32_t argc, const char* argv[])
+BO3_PLUGIN_EXPORT int32_t plugin_load(int32_t argc, const char* argv[])
 {
     return Start();
 }
 
-__declspec(dllexport) int32_t plugin_unload(int32_t argc, const char* argv[])
+BO3_PLUGIN_EXPORT int32_t plugin_unload(int32_t argc, const char* argv[])
 {
     return 0;
 }

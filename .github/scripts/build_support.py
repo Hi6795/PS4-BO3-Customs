@@ -23,6 +23,20 @@ def check_identity(sha, run_id, attempt):
         raise ValueError("Invalid source/run identity")
 
 
+def check_target_report(report, binary_sha):
+    if not isinstance(report, dict) or report.get("sprx_sha256") != binary_sha:
+        raise ValueError("SPRX target inspection belongs to a different binary")
+    if (report.get("format") != "PS4 SCE dynamic library / GoldHEN FSELF" or
+            report.get("machine") != "x86-64" or report.get("payload_segments_verified") != 4 or
+            report.get("console_validated") is not False or report.get("sony_signed") is not False):
+        raise ValueError("Missing SCE module/container validation")
+    required = {"_init", "_fini", "module_start", "module_stop", "plugin_load", "plugin_unload", "g_pluginName"}
+    if set(report.get("exports", [])) != required or not report.get("init") or not report.get("fini"):
+        raise ValueError("Missing GoldHEN entrypoints/exports")
+    if report.get("configuration") not in ("Debug", "Release"):
+        raise ValueError("Unknown native configuration")
+
+
 def package(component, binary, destination):
     root = Path(__file__).resolve().parents[2]
     sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
@@ -46,6 +60,11 @@ def package(component, binary, destination):
                 "console_validated": False}
     if component == "sprx":
         manifest["configuration"] = os.environ.get("BO3_SPRX_CONFIGURATION", "Debug")
+        report = json.loads(Path(os.environ["BO3_SPRX_VALIDATION_REPORT"]).read_text())
+        check_target_report(report, files[name]["sha256"])
+        if report["configuration"] != manifest["configuration"]:
+            raise ValueError("Target report configuration differs from this build")
+        manifest["target_validation"] = report
     (destination / f"manifest-{component}.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 
@@ -84,6 +103,11 @@ def unpack_component(archive, destination, component, sha, run_id, attempt):
         with (destination / name).open("rb") as stream:
             if (destination / name).stat().st_size < 256 or stream.read(len(magic)) != magic:
                 raise ValueError("Artifact is not the expected binary format")
+        if component == "sprx":
+            report = manifest.get("target_validation")
+            check_target_report(report, manifest["files"][name]["sha256"])
+            if manifest.get("configuration") != report["configuration"]:
+                raise ValueError("Target report configuration mismatch")
     return manifest
 
 

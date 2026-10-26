@@ -1967,7 +1967,7 @@ static uint64_t LoadXFile_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, 
                             uint64_t a8, double x0, double x1, double x2, double x3, double x4, double x5, double x6,
                             double x7)
 {
-    ModLoadContexts::Scope loading(g_loadingZones, (uint64_t)scePthreadSelf(), (uintptr_t)a3);
+    decltype(g_loadingZones)::Scope loading(g_loadingZones, (uint64_t)scePthreadSelf(), (uintptr_t)a3);
     const uint64_t result = ((LoadXFile_t)g_loadXFileOriginal)(a1, a2, a3, a4, a5, a6, a7, a8, x0, x1, x2, x3, x4, x5,
                                                                x6, x7);
     return result;
@@ -3689,7 +3689,7 @@ static uint64_t LoadXAssets_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4
             uint64_t result;
 
             {
-                ModLoadContexts::Scope plain(g_plainZones, self, 1);
+                decltype(g_plainZones)::Scope plain(g_plainZones, self, 1);
                 result = plain.Valid()
                     ? LoadXAssets_h(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7)
                     : ((Hook_t)g_loadOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
