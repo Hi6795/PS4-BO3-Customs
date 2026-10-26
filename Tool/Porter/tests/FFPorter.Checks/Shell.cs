@@ -569,7 +569,8 @@ internal static class ShellChecks
                 var data = new byte[name.EndsWith(".xpak") ? 2_400_000 : 300_000];
                 dice.NextBytes(data);
                 files[name] = data;
-                string path = Path.Combine(output, "t7", folder, name.Replace('/', Path.DirectorySeparatorChar));
+                string baseFolder = folder.StartsWith("mods" + Path.DirectorySeparatorChar, StringComparison.Ordinal) ? output : Path.Combine(output, "usermaps");
+                string path = Path.Combine(baseFolder, folder, name.Replace('/', Path.DirectorySeparatorChar));
                 Directory.CreateDirectory(Path.GetDirectoryName(path)!);
                 File.WriteAllBytes(path, data);
             }
@@ -579,8 +580,8 @@ internal static class ShellChecks
         Dictionary<string, byte[]> two = Converted("zm_two", "zm_two.ff", "zm_two.xpak", "workshop.json");
         Dictionary<string, byte[]> cool = Converted(Path.Combine("mods", "coolmod"), "core_mod.ff", "zm_mod.ff", "zm_mod.xpak");
         Converted("zm_mycommon", "zm_mycommon.ff");
-        File.WriteAllText(Path.Combine(output, "t7", "zm_one", "zm_one.fidelity.json"), "{}");
-        File.WriteAllText(Path.Combine(output, "t7", "zm_one", "convert.log"), "x");
+        File.WriteAllText(Path.Combine(output, "usermaps", "zm_one", "zm_one.fidelity.json"), "{}");
+        File.WriteAllText(Path.Combine(output, "usermaps", "zm_one", "convert.log"), "x");
 
         var (window, host, jobs) = Open();
         window.AddPaths([Path.Combine(source, "usermaps"), Path.Combine(source, "mods")]);
@@ -693,7 +694,7 @@ internal static class ShellChecks
             && !Directory.EnumerateFiles(console.Local("/data/BO3-Customs/usermaps/zm_one"), "*.part", SearchOption.AllDirectories).Any(), "sending again finishes the job with the new files, and only for the rows that were chosen");
 
         Named("zm_one").OnConsole = false;
-        Directory.Delete(Path.Combine(output, "t7", "zm_one"), true);
+        Directory.Delete(Path.Combine(output, "usermaps", "zm_one"), true);
         Refresh();
         Call(window, "SendClick", send, new RoutedEventArgs());
         CommunityChecks.Pump(() => !Running(), 30);
@@ -759,7 +760,7 @@ internal static class ShellChecks
         Program.Check(auto.IsCompletedSuccessfully && On(console, "/data/BO3-Customs/usermaps/zm_two", rebuilt) && Named("zm_two").OnConsole && Status(window).StartsWith("Converted and sent to the console |   zm_two")
             && console.Commands.Where(line => line.StartsWith("STOR ")).All(line => line.Contains("/zm_two/")) && !Named("zm_one").OnConsole && !Named("core_mod").OnConsole,
             "with Auto-FTP on, what a run converted goes to the console by itself: not what failed, and not a mod with a zone that did not convert");
-        Program.Check(rebuilt.All(pair => File.Exists(Path.Combine(output, "t7", "zm_two", pair.Key))), "a conversion that was sent stays on the PC");
+        Program.Check(rebuilt.All(pair => File.Exists(Path.Combine(output, "usermaps", "zm_two", pair.Key))), "a conversion that was sent stays on the PC");
         Console.WriteLine($"   asked before replacing: {string.Join(" || ", Program.Asked)}");
         Program.Check(Program.Asked.SequenceEqual(["Overwrite zm_two on the console? | It is already there and gets replaced."]),
             "with Auto-FTP on, a conversion that is already on the console is only sent after asking whether to overwrite it");

@@ -177,7 +177,7 @@ internal static class ConsoleChecks
 
             Press("FilesStartClick");
             Finish();
-            string folder = Path.Combine(root, "out", "t7", "BO3-Customs");
+            string folder = Path.Combine(root, "out", "usermaps", "BO3-Customs");
             Console.WriteLine($"   wrong plugin: {files.State}, {Row()}");
             Program.Check(files.State == RunStates.Failed && text.Text.Contains("does not match its checksum") && Row().StartsWith("[Retry] ") && !Directory.Exists(folder) && !Directory.Exists(folder + ".incoming")
                 && CommunityDownloader.Fetched(files) == 0, "a plugin that does not match GitHub's checksum is thrown away with the rest of the download, and the row offers Retry");
@@ -190,7 +190,7 @@ internal static class ConsoleChecks
             Console.WriteLine($"   downloaded: {Row()}");
             Program.Check(files is { State: RunStates.Done, Local: LocalCopies.Current } && Row() == "[Send to console] 'Downloaded' + Open its folder/Delete from this PC"
                 && got.SequenceEqual(package.Keys.Select(name => name["BO3-Customs/".Length..]).Append("BO3-Customs.sprx").Order())
-                && package.All(pair => File.ReadAllBytes(Path.Combine(root, "out", "t7", pair.Key.Replace('/', '\\'))).AsSpan().SequenceEqual(pair.Value))
+                && package.All(pair => File.ReadAllBytes(Path.Combine(root, "out", "usermaps", pair.Key.Replace('/', '\\'))).AsSpan().SequenceEqual(pair.Value))
                 && File.ReadAllBytes(Path.Combine(folder, "BO3-Customs.sprx")).AsSpan().SequenceEqual(plugin),
                 "Download fetches the console files and the plugin into one folder, menu scripts included, and leaves out what does not belong");
             Look("settings_files_downloaded.png");
@@ -295,7 +295,7 @@ internal static class ConsoleChecks
             Console.WriteLine($"   after Update: [{(second.CanStart ? second.ActionText : "")}] '{second.Note}'; asked GitHub for {string.Join(", ", hub.Seen.Select(line => line.Split(' ')[0]))}");
             Program.Check(second is { State: RunStates.Done, Local: LocalCopies.Current, Light: false, ActionText: "Send to console", Note: "Downloaded" } && !Fetched("Console.zip") && Fetched("v2.10/BO3-Customs.sprx")
                 && File.ReadAllBytes(Path.Combine(folder, "BO3-Customs.sprx")).AsSpan().SequenceEqual(plugins[0])
-                && package.All(pair => File.ReadAllBytes(Path.Combine(root, "out", "t7", pair.Key.Replace('/', '\\'))).AsSpan().SequenceEqual(pair.Value)) && Stored().Length == 0,
+                && package.All(pair => File.ReadAllBytes(Path.Combine(root, "out", "usermaps", pair.Key.Replace('/', '\\'))).AsSpan().SequenceEqual(pair.Value)) && Stored().Length == 0,
                 "Update then downloads the plugin alone and puts it with the files already on this PC");
             panel.Start(second, null);
             Finish();

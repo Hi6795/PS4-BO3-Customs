@@ -340,7 +340,7 @@ internal static class PauseChecks
         Set("_outputOverride", Path.Combine(root, "out"));
         Set("_consoleAddress", null);
         Set("_sendToConsole", false);
-        string folder = Path.Combine(root, "out", "t7", "zm_pause");
+        string folder = Path.Combine(root, "out", "usermaps", "zm_pause");
         string held = Path.Combine(CommunityDownloader.ScratchRoot, "zm_pause");
         try
         {
@@ -394,7 +394,7 @@ internal static class PauseChecks
             string[] asked = [.. server.Asked.Where(line => line.Contains("/maps/"))];
             Console.WriteLine($"   requests: {string.Join(" || ", asked)}");
             Program.Check(map.State == RunStates.Done && map.Fetched == 0 && asked.Length == 2 && asked[0] == $"{one} bytes={kept}-" && asked[1] == two
-                && files.All(pair => File.ReadAllBytes(Path.Combine(root, "out", "t7", pair.Key.Replace('/', '\\'))).AsSpan().SequenceEqual(pair.Value)) && !Directory.Exists(held),
+                && files.All(pair => File.ReadAllBytes(Path.Combine(root, "out", "usermaps", pair.Key.Replace('/', '\\'))).AsSpan().SequenceEqual(pair.Value)) && !Directory.Exists(held),
                 "Resume carries on from the same byte and finishes the map");
 
             Drop(folder);
@@ -458,7 +458,7 @@ internal static class PauseChecks
             CommunityMap Map(string id) => maps.First(map => map.Id == id);
             void Click(string handler, string id) => typeof(CommunityPanel).GetMethod(handler, Private)!.Invoke(panel, [new Button { DataContext = Map(id) }, new RoutedEventArgs()]);
             string Status() => panel.Status;
-            string folder = Path.Combine(root, "out", "t7", "zm_pause");
+            string folder = Path.Combine(root, "out", "usermaps", "zm_pause");
             string held = Path.Combine(CommunityDownloader.ScratchRoot, "zm_pause");
 
             Program.Check(maps.Count == 2 && !Map("zm_pause").CanPause && Map("zm_pause").PauseText == "Pause", "a row that is not working has no Pause button");
@@ -477,7 +477,7 @@ internal static class PauseChecks
             Console.WriteLine($"   row: '{map.StageText}' button '{map.PauseText}', {kept:N0} bytes kept; footer: '{Status()}'");
             Program.Check(flipped && map.IsPaused && map.CanPause && map.CanCancel && map.StageText.StartsWith("Paused · ") && map.Progress == at && map.IsRunning && kept > 0
                 && Directory.Exists(held) && Status() == "Pause Me · paused" && Map("zm_next").State == RunStates.Done && !Map("zm_next").IsPaused
-                && File.Exists(Path.Combine(root, "out", "t7", "zm_next", "zm_next.ff")),
+                && File.Exists(Path.Combine(root, "out", "usermaps", "zm_next", "zm_next.ff")),
                 "Pause turns the button into Resume and the row says Paused and stays where it is; the download that was waiting does not wait for it");
             Program.Render(host, Path.Combine(scratch, "community_paused.png"));
 
@@ -486,11 +486,11 @@ internal static class PauseChecks
             Program.Check(!map.IsPaused && map.PauseText == "Pause", "Resume turns it back into Pause");
             CommunityChecks.Pump(() => !panel.IsDownloading, 60);
             Program.Check(map.State == RunStates.Done && Map("zm_next").State == RunStates.Done && !map.CanPause && !map.IsPaused && File.Exists(Path.Combine(folder, "zm_pause.ff"))
-                && files.All(pair => File.ReadAllBytes(Path.Combine(root, "out", "t7", pair.Key.Replace('/', '\\'))).AsSpan().SequenceEqual(pair.Value)),
+                && files.All(pair => File.ReadAllBytes(Path.Combine(root, "out", "usermaps", pair.Key.Replace('/', '\\'))).AsSpan().SequenceEqual(pair.Value)),
                 "after Resume the paused download carries on and finishes");
 
             Directory.Delete(folder, true);
-            Directory.Delete(Path.Combine(root, "out", "t7", "zm_next"), true);
+            Directory.Delete(Path.Combine(root, "out", "usermaps", "zm_next"), true);
             panel.OutputChanged();
             server.Slow = one;
             Click("StartClick", "zm_pause");

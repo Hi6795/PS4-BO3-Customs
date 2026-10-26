@@ -55,7 +55,7 @@ internal static class DeleteChecks
             var maps = CommunityChecks.Field<System.Collections.ObjectModel.ObservableCollection<CommunityMap>>(panel, "_maps");
             CommunityChecks.Pump(() => CommunityChecks.Field<bool>(panel, "_loaded"), 15);
             CommunityMap Map(string id) => maps.First(map => map.Id == id);
-            string Folder(string id) => Path.Combine(root, "out", "t7", id);
+            string Folder(string id) => Path.Combine(root, "out", "usermaps", id);
             void Click(string handler, string id) => typeof(CommunityPanel).GetMethod(handler, Private)!.Invoke(panel, [new Button { DataContext = Map(id) }, new RoutedEventArgs()]);
             void Finish() => CommunityChecks.Pump(() => !panel.IsDownloading, 60);
             Removal Remove(string id) => (Removal)typeof(CommunityPanel).GetMethod("RemoveLocal", Private)!.Invoke(panel, [Map(id), Folder(id), ""])!;
