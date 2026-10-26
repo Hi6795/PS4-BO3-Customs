@@ -6,41 +6,40 @@ push cancels an older in-progress build. No game-source fixes are merged to
 
 The workflow runs the committed SPRX host regression programs, release-policy
 and package-verification tests, the converter's existing offline Windows test
-suite, the Windows converter publish profile, and the original ORBIS SPRX
-project. Every artifact records its exact source SHA, workflow run, run
+suite, the Windows converter publish profile, and the Linux OpenOrbis/GoldHEN
+SPRX cross-build of every native translation unit. Every artifact records its exact source SHA, workflow run, run
 attempt, file sizes and SHA-256 checksums. Expired, mismatched, incomplete or
 failed builds cannot be published.
 
-## Windows ORBIS runner
+## Hosted SPRX builder
 
-GitHub's hosted Windows image can build the .NET converter. The existing SPRX
-project needs the installed ORBIS SDK and its Visual Studio integration on an
-authorized Windows x64 build machine. No SDK is downloaded, embedded in
-artifacts or uploaded to the repository by these workflows.
+Both components build on GitHub-hosted runners: Windows for the converter,
+Ubuntu 24.04 with LLVM 18 for the SPRX. No personal computer or private ORBIS
+runner needs to remain online.
 
-1. Register a repository runner from
-   [Settings → Actions → Runners](https://github.com/Hi6795/PS4-BO3-Customs/settings/actions/runners/new).
-2. Give it labels `self-hosted`, `Windows`, `X64`, `bo3-orbis` and keep its
-   Actions runner current (checkout uses Node 24).
-3. Install Python 3.11 or later, PowerShell 7, MSBuild, the ORBIS Visual Studio
-   targets and the SDK used by this project. Make `python` available to the
-   runner service. Set the service's `SCE_ORBIS_SDK_DIR` to that SDK and restart
-   the service after changing its environment.
-4. Set the repository Actions variable `BO3_ORBIS_RUNNER_ENABLED` to `true`.
-5. Rerun **BO3 Auto Build** for the fix branch and inspect all four jobs.
+The native job downloads public OpenOrbis 0.5.4 and the pinned GoldHEN CRT
+from upstream, verifies their hashes, compiles all 14 native translation
+units and packages with `create-fself --lib`. The user's uploaded toolchain
+archives are not published. The exact public input URLs, hashes and actual
+compiler/linker versions are recorded in each manifest. See the
+[native adapter](https://github.com/Hi6795/PS4-BO3-Customs/blob/nexus/standalone-converter/SPRX/openorbis/README.md)
+and [dependency lock](openorbis-lock.json).
 
-Until this runner is configured, the SPRX job is skipped and the final
-`complete` job fails with a setup message. A converter artifact alone never
-becomes a full console release.
+Candidates default to **Debug** to retain runtime logging and the kernel
+and Unity watchdog imports. Set `BO3_SPRX_CONFIGURATION=Release` to select
+Release; the selected value appears in the manifest.
 
-SPRX candidates default to the project's **Debug** configuration because
-`t7_log.cpp` disables runtime logging in Release. Set
-`BO3_SPRX_CONFIGURATION=Release` to select the project's Release configuration;
-the selected value appears in the SPRX manifest. This setting does not change
-the automatic prerelease status.
+The native job saves the compiler log, target-aware `readoelf` inspection
+and structured validation report as a CI evidence artifact. It checks
+module parameters, imports, exports, entrypoints, relocations and load
+segments, then compares every packaged FSELF payload with the inspected
+OELF. Its report is bound to the binary SHA-256 in the release manifest.
+Missing or mismatched target inspection evidence blocks publication.
 
-The self-hosted runner executes only the maintained fix branch. These
-workflows have no pull-request execution trigger.
+The original Windows ORBIS project is retained for manual builds. These
+workflows execute the maintained fix branch only and have no pull-request
+execution trigger. Any component failure blocks the `complete` job and
+automatic publication.
 
 ## Release timing
 
@@ -109,7 +108,7 @@ python3 .github/scripts/run_host_checks.py
 ```
 
 The host checks need GCC, Clang, Python 3.11+ and liblua5.4. They are distinct
-from the Windows offline suite and the ORBIS compile. No live release API
+from the Windows offline suite and the OpenOrbis target compile. No live release API
 writes occur during the publisher's unit tests.
 
 The automation files also live on the default branch because GitHub runs

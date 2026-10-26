@@ -64,6 +64,15 @@ def fixture_archive(directory, component, *, sha=SHA, run_id=321, attempt=2):
     manifest = {"schema": 1, "component": component, "commit": sha, "run_id": run_id,
                 "run_attempt": attempt, "files": {name: {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
                                                  for name, data in contents.items()}}
+    if component == "sprx":
+        # Release metadata fixture, not a target binary.
+        manifest["configuration"] = "Debug"
+        manifest["target_validation"] = {
+            "sprx_sha256": manifest["files"]["BO3-Customs.sprx"]["sha256"],
+            "format": "PS4 SCE dynamic library / GoldHEN FSELF", "machine": "x86-64",
+            "payload_segments_verified": 4, "console_validated": False, "sony_signed": False,
+            "configuration": "Debug", "init": 32, "fini": 64,
+            "exports": ["_init", "_fini", "module_start", "module_stop", "plugin_load", "plugin_unload", "g_pluginName"]}
     archive = directory / (component + "-fixture.zip")
     with zipfile.ZipFile(archive, "w") as bundle:
         for name, data in contents.items():
@@ -107,6 +116,20 @@ class PackageTests(unittest.TestCase):
                 bundle.writestr(name, data)
         with self.assertRaises(ValueError):
             unpack_component(archive, self.root / "out", "sprx", SHA, 321, 2)
+
+    def test_missing_or_mismatched_target_inspection_is_rejected(self):
+        for change in (None, {"sprx_sha256": "0" * 64}):
+            archive = fixture_archive(self.root, "sprx")
+            with zipfile.ZipFile(archive) as bundle:
+                files = {name: bundle.read(name) for name in bundle.namelist()}
+            manifest = json.loads(files["manifest-sprx.json"])
+            manifest["target_validation"] = change
+            files["manifest-sprx.json"] = json.dumps(manifest).encode()
+            with zipfile.ZipFile(archive, "w") as bundle:
+                for name, data in files.items():
+                    bundle.writestr(name, data)
+            with self.assertRaises(ValueError):
+                unpack_component(archive, self.root / "out", "sprx", SHA, 321, 2)
 
     def console(self, files):
         archive = self.root / "Console.zip"

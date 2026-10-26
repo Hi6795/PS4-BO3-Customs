@@ -1,0 +1,17 @@
+{
+  "sdk": {
+    "url": "https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/toolchain-llvm-18.tar.gz",
+    "sha256": "3c7cd5bb593ca74fa1c13fd59f3938dc0fc07985167f7275063019e63abe4526",
+    "size": 158688666
+  },
+  "goldhen_crt": {
+    "url": "https://raw.githubusercontent.com/GoldHEN/GoldHEN_Plugins_SDK/bcea3c7ef01dac6d7f9f49ebf9e90fe66d86f5f7/crt/crtprx.c",
+    "sha256": "d34737a0b68dbb1e1c396283d21d5681f069f758020bf6d2e789e521337a9781"
+  },
+  "goldhen_license": {
+    "url": "https://raw.githubusercontent.com/GoldHEN/GoldHEN_Plugins_SDK/bcea3c7ef01dac6d7f9f49ebf9e90fe66d86f5f7/LICENSE",
+    "sha256": "fea871966de39ea6ef5ee584246bdbe60ef233f5847b9cf44edaf0b6cd798b42"
+  },
+  "packager_sha256": "6232098c3eed1b801c97ae90f271315b898c11c5c630831abce7331b502f952c",
+  "inspector_sha256": "9571e78a8a7c04fd142903eeb91f95ed179282d4182c8b9f77cc21bf561c13be"
+}
