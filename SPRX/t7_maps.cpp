@@ -1350,26 +1350,32 @@ static int MapPackage(const char* name)
 }
 
 // The global redirected-file table is bounded and may be full when many maps
-// are installed.  A discovered map must still be able to open its own FF,
-// including localized copies, independently of that table's capacity.
-static int MapFastfilePackage(const char* rel)
+// are installed. Resolve a discovered map's zone files independently of that
+// table, including language variants and sound-bank subdirectories.
+static int MapPackageFile(const char* rel)
 {
-    if (!rel || !EndsWith(rel, ".ff"))
+    if (!rel || !IsZoneFile(rel))
         return -1;
 
-    const size_t length = strlen(rel);
-    if (length <= 3 || length - 3 >= kNameMax)
+    const char* const slash = strrchr(rel, '/');
+    const char* const basename = slash ? slash + 1 : rel;
+    const char* const extension = strrchr(basename, '.');
+    if (!extension)
+        return -1;
+
+    const size_t length = (size_t)(extension - basename);
+    if (!length || length >= kNameMax)
         return -1;
 
     char name[kNameMax];
-    memcpy(name, rel, length - 3);
-    name[length - 3] = 0;
+    memcpy(name, basename, length);
+    name[length] = 0;
 
     const int exact = MapPackage(name);
     if (exact >= 0)
         return exact;
 
-    return length > 6 && LanguagePrefixed(name) ? MapPackage(name + 3) : -1;
+    return length > 3 && LanguagePrefixed(name) ? MapPackage(name + 3) : -1;
 }
 
 static uint64_t FileOpen_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
@@ -1398,7 +1404,7 @@ static uint64_t FileOpen_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, u
             }
             else
             {
-                const int mapPackage = MapFastfilePackage(rel);
+                const int mapPackage = MapPackageFile(rel);
                 if (mapPackage >= 0 && FindPackageFile(g_packages[mapPackage], rel, mapPath, sizeof(mapPath)))
                 {
                     a1 = (uint64_t)mapPath;

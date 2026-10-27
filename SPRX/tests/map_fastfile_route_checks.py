@@ -1,4 +1,4 @@
-"""Run the real map file-open hook with a full registry and mocked PS4 file I/O."""
+"""Run the map asset file-open hook with a full registry and mocked PS4 I/O."""
 from pathlib import Path
 import os
 import subprocess
@@ -29,10 +29,10 @@ PREFIX = r'''
 #include <cstring>
 #include <string>
 #define _DEBUG
-constexpr int kNameMax=192, kMaxFiles=1536;
+constexpr int kNameMax=56, kMaxFiles=1536;
 struct Package { char name[kNameMax]; char folder[224]; char alternate[224]; bool map; };
 struct File { char rel[128]; char path[224]; int package; };
-static Package g_packages[1]={{"zm_ds_house_zw", "/data/BO3-Customs/usermaps/zm_ds_house_zw", "", true}};
+static Package g_packages[1]={{"zm_ds_house_zw", "/ext0/BO3-Customs/usermaps/zm_ds_house_zw", "", true}};
 static int g_packageCount=1;
 static File g_files[kMaxFiles] = {};
 static int g_fileCount=kMaxFiles;
@@ -77,32 +77,42 @@ static bool LanguagePrefixed(const char*);
 MAIN = r'''
 int main()
 {
-    assert(MapFastfilePackage("zm_ds_house_zw.ff")==0);
-    assert(MapFastfilePackage("en_zm_ds_house_zw.ff")==0);
-    assert(MapFastfilePackage("zm_ds_house_zw.fd")==-1);
-    assert(MapFastfilePackage("other.ff")==-1);
+    assert(MapPackageFile("zm_ds_house_zw.ff")==0);
+    assert(MapPackageFile("en_zm_ds_house_zw.ff")==0);
+    assert(MapPackageFile("zm_ds_house_zw.fd")==0);
+    assert(MapPackageFile("zm_ds_house_zw.xpak")==0);
+    assert(MapPackageFile("en_zm_ds_house_zw.sabl")==0);
+    assert(MapPackageFile("zm_ds_house_zw.sabs")==0);
+    assert(MapPackageFile("snd/en/zm_ds_house_zw.sabl")==0);
+    assert(MapPackageFile("other.ff")==-1);
+    assert(MapPackageFile("zm_ds_house_zw.txt")==-1);
     const char* const request="/app0/zone/zm_ds_house_zw.ff";
     assert(FileOpen_h((uintptr_t)request,0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
-    assert(actualPath=="/data/BO3-Customs/usermaps/zm_ds_house_zw/zm_ds_house_zw.ff");
+    assert(actualPath=="/ext0/BO3-Customs/usermaps/zm_ds_house_zw/zm_ds_house_zw.ff");
     overrideEnabled=true;
     assert(FileOpen_h((uintptr_t)request,0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
     assert(actualPath==overrideFile.path);
     overrideEnabled=false;
     assert(FileOpen_h((uintptr_t)"/app0/zone/en_zm_ds_house_zw.ff",0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
-    assert(actualPath=="/data/BO3-Customs/usermaps/zm_ds_house_zw/en_zm_ds_house_zw.ff");
+    assert(actualPath=="/ext0/BO3-Customs/usermaps/zm_ds_house_zw/en_zm_ds_house_zw.ff");
+    assert(FileOpen_h((uintptr_t)"/app0/zone/zm_ds_house_zw.xpak",0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
+    assert(actualPath=="/ext0/BO3-Customs/usermaps/zm_ds_house_zw/zm_ds_house_zw.xpak");
+    assert(FileOpen_h((uintptr_t)"/app0/zone/snd/en/zm_ds_house_zw.sabl",0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
+    assert(actualPath=="/ext0/BO3-Customs/usermaps/zm_ds_house_zw/snd/en/zm_ds_house_zw.sabl");
     exists=false;
     assert(FileOpen_h((uintptr_t)request,0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
     assert(actualPath==request);
     assert(FileOpen_h((uintptr_t)"/app0/zone/other.ff",0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
     assert(actualPath=="/app0/zone/other.ff");
-    std::puts("PASS: direct map FF resolution with full table, localized FF, stack precedence and fallback");
+    std::puts("PASS: external map asset resolution with full table, localization, mod precedence and fallback");
 }
 '''
 
 
 def main():
-    snippets = [extract("static int MapPackage("), extract("static bool LanguagePrefixed(const char* name)\n{"),
-                extract("static int MapFastfilePackage("), extract("static uint64_t FileOpen_h(")]
+    snippets = [extract("static bool IsZoneFile("), extract("static int MapPackage("),
+                extract("static bool LanguagePrefixed(const char* name)\n{"),
+                extract("static int MapPackageFile("), extract("static uint64_t FileOpen_h(")]
     with tempfile.TemporaryDirectory(prefix="bo3-ff-route-") as temporary:
         source = Path(temporary) / "map_route.cpp"
         output = Path(temporary) / "map_route"
