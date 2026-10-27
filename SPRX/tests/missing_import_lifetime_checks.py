@@ -52,7 +52,7 @@ static uint64_t DialogNative(uint64_t a,uint64_t b,uint64_t c,uint64_t d,uint64_
 static void* g_scriptImportOriginal=(void*)ImportNative;
 static void* g_errorDialogOriginal=(void*)DialogNative;
 static uint32_t g_scriptErrors=0;
-static void ScriptErrorSummary(const char*) {}
+[[maybe_unused]] static void ScriptErrorSummary(const char*) {}
 void T7Maps_TraceDiagnostics(const char*) {}
 static bool RangeReadable(uintptr_t address,size_t size)
 {
