@@ -3002,8 +3002,10 @@ static void AddPcUtil()
     if (UiUp())
     {
         if (fresh)
+        {
             T7Log_Write("[Lua] new UI state for %s", (const char*)(g_base + kCurrentMap));
             TraceStateLocked("new UI state");
+        }
 
         RunLua(k_menuWatchLua, "=bo3customs_menuwatch");
         RunLua(k_isPcLua, "=bo3customs_ispc");
