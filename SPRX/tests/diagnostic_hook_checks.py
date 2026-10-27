@@ -159,6 +159,13 @@ int main()
     *(uintptr_t*)T7Lua::g_base=0x1234;
     T7Lua_TraceState("ready test");
     assert(lines.back().find("observed-generation=1")!=std::string::npos);
+    assert(T7Lua::UiTryLock());
+    assert(T7Lua::locks==2 && T7Lua::unlocks==1);
+    T7Lua::TraceStateLocked("caller already holds lock");
+    assert(T7Lua::locks==2 && T7Lua::unlocks==1);
+    assert(lines.back().find("observed-generation=1")!=std::string::npos);
+    T7Lua::UiUnlock();
+    assert(T7Lua::locks==T7Lua::unlocks);
     T7Lua_TraceState("same state");
     assert(lines.back().find("observed-generation=1")!=std::string::npos);
     *(uintptr_t*)T7Lua::g_base=0;
@@ -259,13 +266,15 @@ def main():
     assert 'T7Maps_TraceDiagnostics("clientfield mismatch")' in LOG
     assert "owner=%s" in LOG
     lua = (ROOT / "t7_lua.cpp").read_text()
-    trace = lua[lua.index("void T7Lua_TraceState("):lua.index("bool T7Lua_IsUiState(")]
-    assert "UiTryLock()" in trace and "UiUnlock();" in trace
-    assert "utility-matches-current=%d" in trace
-    assert "mouse-matches-current=%d" in trace
-    assert "utility-matches-current=%d" in trace
-    assert "mouse-matches-current=%d" in trace
-    assert "RunLua" not in trace and "RunOnTop" not in trace
+    trace_locked = extract_function(lua, "static void TraceStateLocked(const char* reason)\\n{")
+    trace = extract_function(lua, "void T7Lua_TraceState(const char* reason)\\n{")
+    add_pc_util = extract_function(lua, "static void AddPcUtil()\\n{")
+    assert "UiTryLock" not in trace_locked and "UiUnlock" not in trace_locked
+    assert "UiTryLock()" in trace and "TraceStateLocked(reason);" in trace and "UiUnlock();" in trace
+    assert 'TraceStateLocked("new UI state");' in add_pc_util
+    assert "utility-matches-current=%d" in trace_locked
+    assert "mouse-matches-current=%d" in trace_locked
+    assert "RunLua" not in trace_locked and "RunOnTop" not in trace_locked
     with tempfile.TemporaryDirectory(prefix="bo3-log-check-") as temp:
         temp = Path(temp)
         source, binary = temp / "hook.cpp", temp / "hook"
@@ -277,7 +286,8 @@ def main():
             maps, "static void TraceModTransition(const char* when, const char* level)\n{"
         )
         level_hook = extract_function(maps, "static uint64_t LoadLevelZones_h(")
-        source.write_text(TRANSITION_PREFIX + trace + TRANSITION_SUFFIX + transition + TRANSITION_MAIN
+        source.write_text(TRANSITION_PREFIX + "namespace T7Lua {\\n" + trace_locked + "\\n}\\n"
+                          + trace + TRANSITION_SUFFIX + transition + TRANSITION_MAIN
                           + level_hook + TRANSITION_END)
         subprocess.run([os.environ.get("CXX", "g++"), "-std=c++20", "-Wall", "-Wextra", "-Werror",
                         "-O1", "-pthread", str(source), "-o", str(binary)], check=True)
