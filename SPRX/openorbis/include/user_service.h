@@ -1,0 +1,6 @@
+#pragma once
+#include <orbis/UserService.h>
+using SceUserServiceUserId = OrbisUserServiceUserId;
+using SceUserServiceLoginUserIdList = OrbisUserServiceLoginUserIdList;
+#define SCE_USER_SERVICE_MAX_LOGIN_USERS ORBIS_USER_SERVICE_MAX_LOGIN_USERS
+#define SCE_USER_SERVICE_USER_ID_INVALID ORBIS_USER_SERVICE_USER_ID_INVALID
