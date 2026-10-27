@@ -4,6 +4,7 @@
 
 #ifdef _DEBUG
 
+#include <atomic>
 #include "script_error_budget.hpp"
 
 namespace T7Log
@@ -939,7 +940,6 @@ static const char* ScriptVmName(unsigned vm)
 
 static void ScriptText(uintptr_t address, char (&text)[192])
 {
-    // Only inspect a bounded, validated span; the VM still owns the message.
     if (address && RangeReadable(address, sizeof(text)))
         snprintf(text, sizeof(text), "%.*s", (int)sizeof(text) - 1, (const char*)address);
     else
@@ -961,7 +961,7 @@ static void ScriptErrorSummary(const char* when)
         const Budget::Counts& count = counts[vm];
         if (count.total || busy[vm])
             T7Log_Write("[Script] %s summary (%s): %u observed, %u distinct retained, "
-                        "%u outside the distinct limit, %u omitted during concurrent diagnostics",
+                         "%u outside the distinct limit, %u omitted during concurrent diagnostics",
                         ScriptVmName(vm), when, count.total, count.unique, count.overflow, busy[vm]);
     }
 }
@@ -1472,16 +1472,16 @@ void T7Log_NewLevel()
     if (!g_base)
         return;
 
+    ScriptErrorSummary("end of previous level");
+    g_scriptBudget.NewLevel();
     WatchKillServer();
 
     for (int i = 0; i < kMissingSlots; ++i)
         g_missingSeen[i] = 0;
 
-    ScriptErrorSummary("end of previous level");
-    g_scriptBudget.NewLevel();
-    ResetMissingImports();
     g_missingCount = 0;
     g_scriptErrors = 0;
+    ResetMissingImports();
     g_uiErrors = 0;
     g_commands = 0;
 
@@ -1576,4 +1576,3 @@ void T7Log_PoolOut(int32_t)
 }
 
 #endif
-

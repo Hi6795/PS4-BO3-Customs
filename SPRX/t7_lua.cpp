@@ -2968,6 +2968,29 @@ static void HookFindXAsset()
     Detour_Attach(&g_findAssetDetour, (uint64_t)(g_base + kFindXAsset), (void*)FindXAsset, &g_findAssetOriginal);
 }
 
+static void TraceStateLocked(const char* reason)
+{
+#ifdef _DEBUG
+    // Caller owns the UI lock. Keep this helper nonblocking and lock-free.
+    static uintptr_t lastState = 0;
+    static uint32_t observedGeneration = 0;
+    const uintptr_t state = *(const uintptr_t*)(g_base + kLuaState);
+    if (state != lastState)
+    {
+        ++observedGeneration;
+        lastState = state;
+    }
+    T7Log_Write("[Transition] UI snapshot (%s): observed-generation=%u state=0x%llX "
+                "utility-state=0x%llX utility-matches-current=%d mouse-state=0x%llX "
+                "mouse-matches-current=%d ready=%d force-inject=%d",
+                reason, observedGeneration, (unsigned long long)state, (unsigned long long)g_pcUtilState,
+                state != 0 && state == g_pcUtilState ? 1 : 0, (unsigned long long)g_mouseState,
+                state != 0 && state == g_mouseState ? 1 : 0, UiUp() ? 1 : 0, g_forceInject ? 1 : 0);
+#else
+    (void)reason;
+#endif
+}
+
 static void AddPcUtil()
 {
     const uintptr_t L = g_base != 0 ? *(const uintptr_t*)(g_base + kLuaState) : 0;
@@ -2979,10 +3002,8 @@ static void AddPcUtil()
     if (UiUp())
     {
         if (fresh)
-        {
             T7Log_Write("[Lua] new UI state for %s", (const char*)(g_base + kCurrentMap));
-            T7Lua_TraceState("new UI state");
-        }
+            TraceStateLocked("new UI state");
 
         RunLua(k_menuWatchLua, "=bo3customs_menuwatch");
         RunLua(k_isPcLua, "=bo3customs_ispc");
@@ -3117,7 +3138,6 @@ void T7Lua_Tick()
     ++g_ticks;
 
 #ifdef _DEBUG
-    // Dvar capture must not depend on a live menu or a successful Lua call.
     if ((g_ticks % 6) == 0)
     {
         FlushDvarLog("bo3customs_gsc_log", "ScriptLog");
@@ -3192,21 +3212,7 @@ void T7Lua_TraceState(const char* reason)
         T7Log_Write("[Transition] UI snapshot (%s): busy; no Lua inspected", reason);
         return;
     }
-    // This sequence tracks observed state-pointer changes, not native VM allocations.
-    static uintptr_t lastState = 0;
-    static uint32_t observedGeneration = 0;
-    const uintptr_t state = *(const uintptr_t*)(g_base + kLuaState);
-    if (state != lastState)
-    {
-        ++observedGeneration;
-        lastState = state;
-    }
-    T7Log_Write("[Transition] UI snapshot (%s): observed-generation=%u state=0x%llX "
-                "utility-state=0x%llX utility-matches-current=%d mouse-state=0x%llX "
-                "mouse-matches-current=%d ready=%d force-inject=%d",
-                reason, observedGeneration, (unsigned long long)state, (unsigned long long)g_pcUtilState,
-                state != 0 && state == g_pcUtilState ? 1 : 0, (unsigned long long)g_mouseState,
-                state != 0 && state == g_mouseState ? 1 : 0, UiUp() ? 1 : 0, g_forceInject ? 1 : 0);
+    TraceStateLocked(reason);
     UiUnlock();
 #else
     (void)reason;
@@ -3277,4 +3283,3 @@ bool T7Lua_RunOnTop(uintptr_t L, const char* source, const char* chunk)
 
     return true;
 }
-
