@@ -1,0 +1,37 @@
+name: SPRX diagnostics
+
+on:
+  push:
+    paths:
+      - 'SPRX/t7_log.cpp'
+      - 'SPRX/t7_maps.cpp'
+      - 'SPRX/t7_lua.cpp'
+      - 'SPRX/t7_lua.hpp'
+      - 'SPRX/script_error_budget.hpp'
+      - 'SPRX/tests/**'
+      - '.github/workflows/sprx-diagnostics.yml'
+  pull_request:
+    paths:
+      - 'SPRX/**'
+      - '.github/workflows/sprx-diagnostics.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostics:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Exercise script error budgets and diagnostic hooks
+        run: |
+          mkdir -p build/diagnostics
+          g++ -std=c++20 -Wall -Wextra -Werror -O1 -pthread SPRX/tests/script_error_budget_tests.cpp -o build/diagnostics/error-budget
+          build/diagnostics/error-budget
+          python3 SPRX/tests/diagnostic_hook_checks.py
+          python3 SPRX/tests/missing_import_lifetime_checks.py
+          python3 SPRX/tests/game_log_bridge_checks.py
