@@ -283,15 +283,9 @@ def main():
                         "-O1", "-pthread", str(source), "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True)
         maps = (ROOT / "t7_maps.cpp").read_text()
-        stack_start = maps.index("static int StackPrefix(")
-        stack_end = maps.index("static bool IsModZoneName(", stack_start)
-        stack_prefix = maps[stack_start:stack_end]
-        base_start = maps.index("static bool ScriptBase(")
-        base_end = maps.index("static void ClaimStackScript(", base_start)
-        script_base = maps[base_start:base_end]
-        owner_start = maps.index("static int ScriptOwner(")
-        owner_end = maps.index("static void TraceModTransition(const char* when, const char* level)\n{", owner_start)
-        owner = maps[owner_start:owner_end]
+        stack_prefix = extract_function(maps, "static int StackPrefix(")
+        script_base = extract_function(maps, "static bool ScriptBase(")
+        owner = extract_function(maps, "static int ScriptOwner(")
         source.write_text(OWNER_PREFIX + stack_prefix + script_base + owner + OWNER_MAIN)
         subprocess.run([os.environ.get("CXX", "g++"), "-std=c++20", "-Wall", "-Wextra", "-Werror",
                         "-O1", "-pthread", str(source), "-o", str(binary)], check=True)
