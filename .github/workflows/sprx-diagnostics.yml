@@ -34,3 +34,4 @@ jobs:
           build/diagnostics/error-budget
           python3 SPRX/tests/diagnostic_hook_checks.py
           python3 SPRX/tests/missing_import_lifetime_checks.py
+          python3 SPRX/tests/game_log_bridge_checks.py

@@ -2010,35 +2010,33 @@ static void HandleQuit()
 }
 
 #ifdef _DEBUG
-static void FlushLuaLog()
+static void FlushDvarLog(const char* name, const char* source)
 {
-    if (!RunLua(k_logFlushLua, "=bo3customs_logflush"))
-        return;
-
-    const uintptr_t dvar = FindDvar("bo3customs_log");
+    const uintptr_t dvar = FindDvar(name);
     const char* const text = dvar ? DvarText(dvar) : nullptr;
-
     if (!text || !text[0])
         return;
 
     char lines[1024];
     snprintf(lines, sizeof(lines), "%s", text);
-    SetDvar("bo3customs_log", "");
+    SetDvar(name, "");
 
     char* rest = lines;
-
     while (rest && *rest)
     {
         char* const end = strchr(rest, '\n');
-
-        if (end)
-            *end = 0;
-
-        if (*rest)
-            T7Log_Write("[MapSelect] %s", rest);
-
+        if (end) *end = 0;
+        if (*rest) T7Log_Write("[%s] %s", source, rest);
         rest = end ? end + 1 : nullptr;
     }
+}
+
+static void FlushLuaLog()
+{
+    // Preserve a pending native/GSC message before the UI queue reuses its dvar.
+    FlushDvarLog("bo3customs_log", "MapSelect");
+    if (RunLua(k_logFlushLua, "=bo3customs_logflush"))
+        FlushDvarLog("bo3customs_log", "MapSelect");
 }
 #endif
 
@@ -3117,6 +3115,16 @@ void T7Lua_Tick()
         return;
 
     ++g_ticks;
+
+#ifdef _DEBUG
+    // Dvar capture must not depend on a live menu or a successful Lua call.
+    if ((g_ticks % 6) == 0)
+    {
+        FlushDvarLog("bo3customs_gsc_log", "ScriptLog");
+        if (!InMenus())
+            FlushDvarLog("bo3customs_log", "ScriptLog");
+    }
+#endif
 
     AddPcUtil();
 

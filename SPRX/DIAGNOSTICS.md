@@ -87,3 +87,23 @@ reports the copied name and forwards the original error. The test also covers
 independent VM records, one-time consumption, level reset, reset during native
 resolution and argument/return passthrough. This fixes a secondary crash in
 Debug error reporting, not the underlying unresolved import or map mismatch.
+
+## In-match GSC dvar capture
+
+Debug ticks poll `bo3customs_gsc_log` every six ticks without requiring a ready
+UI or acquiring its lock. During gameplay the legacy `bo3customs_log` channel is
+also drained. The menu path captures a pending legacy value before running the
+UI queue, so UI messages cannot replace it first; a failed Lua call does not
+discard that pending value.
+
+The dedicated channel keeps GSC producers separate from the UI queue. Existing
+producers using the legacy channel remain compatible. These dvars are
+single-value, best-effort mailboxes: multiple writes between polls can still
+replace one another. They are not a substitute for LogPrint or saved per-player
+state snapshots. In-game captures use the `[ScriptLog]` label.
+
+Run `python3 SPRX/tests/game_log_bridge_checks.py` to exercise the actual drain
+and tick bodies with host stubs. It covers message ordering, failed Lua calls,
+gameplay with no available UI and menu routing. Native toolchain/console
+validation is still required; this change captures diagnostics, not a claim
+that the underlying native crash is fixed.
