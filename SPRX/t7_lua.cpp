@@ -3178,6 +3178,36 @@ bool T7Lua_DvarString(const char* name, char* out, size_t size)
     return true;
 }
 
+void T7Lua_TraceState(const char* reason)
+{
+#ifdef _DEBUG
+    using namespace T7Lua;
+    if (!g_base) return;
+    if (!UiTryLock())
+    {
+        T7Log_Write("[Transition] UI snapshot (%s): busy; no Lua inspected", reason);
+        return;
+    }
+    static uintptr_t lastState = 0;
+    static uint32_t observedGeneration = 0;
+    const uintptr_t state = *(const uintptr_t*)(g_base + kLuaState);
+    if (state != lastState)
+    {
+        ++observedGeneration;
+        lastState = state;
+    }
+    T7Log_Write("[Transition] UI snapshot (%s): observed-generation=%u state=0x%llX "
+                "utility-state=0x%llX utility-matches-current=%d mouse-state=0x%llX "
+                "mouse-matches-current=%d ready=%d force-inject=%d",
+                reason, observedGeneration, (unsigned long long)state, (unsigned long long)g_pcUtilState,
+                state != 0 && state == g_pcUtilState ? 1 : 0, (unsigned long long)g_mouseState,
+                state != 0 && state == g_mouseState ? 1 : 0, UiUp() ? 1 : 0, g_forceInject ? 1 : 0);
+    UiUnlock();
+#else
+    (void)reason;
+#endif
+}
+
 bool T7Lua_IsUiState(uintptr_t L)
 {
     return T7Lua::g_base && L == *(const uintptr_t*)(T7Lua::g_base + T7Lua::kLuaState);

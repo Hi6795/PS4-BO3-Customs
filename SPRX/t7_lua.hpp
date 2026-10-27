@@ -15,4 +15,6 @@ bool T7Lua_DvarString(const char* name, char* out, size_t size);
 
 bool T7Lua_IsUiState(uintptr_t L);
 
+void T7Lua_TraceState(const char* reason);
+
 void T7Lua_RunShareVm(uintptr_t L);
