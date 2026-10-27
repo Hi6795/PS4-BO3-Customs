@@ -1338,6 +1338,27 @@ static const File* StackFile(const char* rel)
 
 static bool LanguagePrefixed(const char* name);
 
+// The front-end and base engine bootstrap zones must come from the installed
+// game. A shared custom zone with the same filename must never replace them:
+// its contents need not have the asset/layout contract of the retail zone.
+// Keep core_mod exempt; it is the supported custom mod-zone name.
+static bool NativeBootstrapFile(const char* rel)
+{
+    if (!rel || !IsZoneFile(rel))
+        return false;
+
+    const char* const slash = strrchr(rel, '/');
+    const char* name = slash ? slash + 1 : rel;
+
+    if (LanguagePrefixed(name))
+        name += 3;
+
+    if (strncmp(name, "core_", 5) != 0 || strncmp(name, "core_mod.", 9) == 0)
+        return false;
+
+    return true;
+}
+
 static int MapPackage(const char* name)
 {
     for (int i = 0; i < g_packageCount; ++i)
@@ -1396,7 +1417,8 @@ static uint64_t FileOpen_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, u
         {
             ListReader reading;
             int found = -1;
-            const File* const mod = StackFile(rel);
+            const bool nativeBootstrap = NativeBootstrapFile(rel);
+            const File* const mod = nativeBootstrap ? nullptr : StackFile(rel);
 
             if (mod)
             {
@@ -1404,7 +1426,7 @@ static uint64_t FileOpen_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, u
             }
             else
             {
-                const int mapPackage = MapPackageFile(rel);
+                const int mapPackage = nativeBootstrap ? -1 : MapPackageFile(rel);
                 if (mapPackage >= 0 && FindPackageFile(g_packages[mapPackage], rel, mapPath, sizeof(mapPath)))
                 {
                     a1 = (uint64_t)mapPath;
@@ -1415,12 +1437,18 @@ static uint64_t FileOpen_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, u
                     {
                         if (strcmp(g_files[i].rel, rel) == 0)
                         {
-                            found = i;
+                            if (!nativeBootstrap)
+                                found = i;
+#ifdef _DEBUG
+                            else
+                                T7Log_Write("[Routing] ignored custom override of native bootstrap %s at %s", rel,
+                                            g_files[i].path);
+#endif
                             break;
                         }
                     }
 
-                    if (found < 0)
+                    if (!nativeBootstrap && found < 0)
                         found = LanguageCompanion(rel);
 
                     if (found >= 0)
@@ -1437,11 +1465,20 @@ static uint64_t FileOpen_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, u
         }
     }
 
+#ifdef _DEBUG
+    const char* const routed = (const char*)a1;
+    const bool externalRedirect = path && routed != path &&
+                                  (strncmp(routed, "/ext", 4) == 0 || strncmp(routed, "/usb", 4) == 0);
+    const uint64_t openedAt = externalRedirect ? sceKernelGetProcessTime() : 0;
+#endif
     const uint64_t result = ((Hook_t)g_openOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
 #ifdef _DEBUG
     if (diagnosticPackage >= 0)
         T7Log_Write("[MapLoad] open %s -> %s (package %s, fd %d)", diagnosticRel, (const char*)a1,
                     g_packages[diagnosticPackage].name, (int32_t)result);
+    else if (externalRedirect)
+        T7Log_Write("[Routing] external open %s -> %s: fd %d, call %llu us", path, routed, (int32_t)result,
+                    (unsigned long long)(sceKernelGetProcessTime() - openedAt));
 #endif
     return result;
 }
