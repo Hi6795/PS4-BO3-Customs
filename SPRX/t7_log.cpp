@@ -1,5 +1,6 @@
 #include "headers.hpp"
 #include "t7_log.hpp"
+#include "t7_maps.hpp"
 
 #ifdef _DEBUG
 
@@ -982,9 +983,17 @@ static uint64_t ScriptError(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, 
     {
         uint32_t offset = 0;
         const char* const script = ScriptAt(a2, &offset);
-        T7Log_Write("[Script] %s runtime error %u in %s +0x%X: %s%s%s (occurrence %u)",
+        const int owner = script ? T7Maps_ScriptOwner(script) : -1;
+        char ownerText[24];
+        if (owner >= 0)
+            snprintf(ownerText, sizeof(ownerText), "mod-slot-%d", owner + 1);
+        else if (owner == -2)
+            snprintf(ownerText, sizeof(ownerText), "claim-table-busy");
+        else
+            snprintf(ownerText, sizeof(ownerText), "untracked");
+        T7Log_Write("[Script] %s runtime error %u in %s +0x%X (owner=%s): %s%s%s (occurrence %u)",
                     ScriptVmName(note.vm), count, script ? script : "(no loaded script holds the code position)",
-                    offset, message, a4 && a4 != raised ? " / " : "", a4 && a4 != raised ? dialog : "",
+                    offset, ownerText, message, a4 && a4 != raised ? " / " : "", a4 && a4 != raised ? dialog : "",
                     note.occurrences);
     }
     else if (note.kind == Budget::Kind::Overflow)
@@ -1077,6 +1086,9 @@ static uint64_t ErrorDialog(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, 
     ScriptErrorSummary("Com_Error");
     T7Log_Write("[Error] Com_Error %u: %s (%u script runtime error(s) this level)", (uint32_t)a1,
                 message ? message : "(no message)", g_scriptErrors);
+
+    if (message && (strstr(message, "Clientfield Mismatch") || strstr(message, "clientfield mismatch")))
+        T7Maps_TraceDiagnostics("clientfield mismatch");
 
     if (message && strstr(message, "script error(s)"))
     {

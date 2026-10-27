@@ -30,6 +30,11 @@ bool T7Maps_ModPreviewFile(uint32_t key, char* path, size_t size);
 
 void T7Maps_FrameHeartbeat();
 
+// Return the owning zero-based loaded-mod slot, -1 if untracked, or -2 if the claim table is busy.
+int T7Maps_ScriptOwner(const char* script);
+
+void T7Maps_TraceDiagnostics(const char* reason);
+
 void T7Maps_FrameWork();
 
 void T7Maps_RequestApply();

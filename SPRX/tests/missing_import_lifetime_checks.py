@@ -53,6 +53,7 @@ static void* g_scriptImportOriginal=(void*)ImportNative;
 static void* g_errorDialogOriginal=(void*)DialogNative;
 static uint32_t g_scriptErrors=0;
 static void ScriptErrorSummary(const char*) {}
+void T7Maps_TraceDiagnostics(const char*) {}
 static bool RangeReadable(uintptr_t address,size_t size)
 {
     if(!address || address+size<address) return false;

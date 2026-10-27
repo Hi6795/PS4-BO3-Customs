@@ -3202,9 +3202,11 @@ void T7Lua_TraceState(const char* reason)
         lastState = state;
     }
     T7Log_Write("[Transition] UI snapshot (%s): observed-generation=%u state=0x%llX "
-                "utility-state=0x%llX mouse-state=0x%llX ready=%d force-inject=%d",
+                "utility-state=0x%llX utility-matches-current=%d mouse-state=0x%llX "
+                "mouse-matches-current=%d ready=%d force-inject=%d",
                 reason, observedGeneration, (unsigned long long)state, (unsigned long long)g_pcUtilState,
-                (unsigned long long)g_mouseState, UiUp() ? 1 : 0, g_forceInject ? 1 : 0);
+                state != 0 && state == g_pcUtilState ? 1 : 0, (unsigned long long)g_mouseState,
+                state != 0 && state == g_mouseState ? 1 : 0, UiUp() ? 1 : 0, g_forceInject ? 1 : 0);
     UiUnlock();
 #else
     (void)reason;
