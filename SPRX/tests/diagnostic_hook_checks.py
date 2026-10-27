@@ -221,6 +221,21 @@ int main()
 }
 """
 
+def extract_function(source, signature):
+    """Return one C++ function definition using balanced braces."""
+    start = source.index(signature)
+    opening = source.index("{", start)
+    depth = 0
+    for index in range(opening, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+    raise ValueError(f"unterminated function: {signature}")
+
+
 def main():
     assert "kScriptErrorsLogged" not in LOG
     assert 'ScriptErrorSummary("Com_Error")' in LOG
@@ -258,10 +273,10 @@ def main():
         subprocess.run([os.environ.get("CXX", "g++"), "-std=c++20", "-Wall", "-Wextra", "-Werror",
                         "-O1", "-pthread", "-I", str(ROOT), str(source), "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True)
-        start = maps.index("static void TraceModTransition(const char* when, const char* level)\n{")
-        transition = maps[start:maps.index("static void ClearAssetsInUse()", start)]
-        start = maps.index("static uint64_t LoadLevelZones_h(")
-        level_hook = maps[start:maps.index("static uint64_t BlockJob_h(", start)]
+        transition = extract_function(
+            maps, "static void TraceModTransition(const char* when, const char* level)\n{"
+        )
+        level_hook = extract_function(maps, "static uint64_t LoadLevelZones_h(")
         source.write_text(TRANSITION_PREFIX + trace + TRANSITION_SUFFIX + transition + TRANSITION_MAIN
                           + level_hook + TRANSITION_END)
         subprocess.run([os.environ.get("CXX", "g++"), "-std=c++20", "-Wall", "-Wextra", "-Werror",
