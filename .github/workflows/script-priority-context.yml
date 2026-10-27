@@ -1,0 +1,20 @@
+name: Script priority context regression
+on:
+  push:
+    paths:
+      - 'SPRX/t7_maps.cpp'
+      - 'SPRX/mod_load_context.hpp'
+      - 'SPRX/tests/script_priority_context_checks.py'
+      - '.github/workflows/script-priority-context.yml'
+  pull_request:
+    paths:
+      - 'SPRX/t7_maps.cpp'
+      - 'SPRX/mod_load_context.hpp'
+      - 'SPRX/tests/script_priority_context_checks.py'
+      - '.github/workflows/script-priority-context.yml'
+jobs:
+  priority:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 SPRX/tests/script_priority_context_checks.py

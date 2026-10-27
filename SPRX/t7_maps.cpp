@@ -2,6 +2,7 @@
 #include "t7_maps.hpp"
 #include "t7_mapimages.hpp"
 #include "t7_lua.hpp"
+#include "mod_load_context.hpp"
 
 #include <atomic>
 
@@ -497,7 +498,7 @@ static Dispatch               g_dispatches[kDispatchesKept];
 static std::atomic<uint32_t>  g_dispatchCount{0};
 static std::atomic<uint32_t>  g_spawnersDropped{0};
 #endif
-static std::atomic<uint64_t> g_scriptLinker{0};
+static ModLoadContexts<> g_scriptLinkers;
 
 static bool     g_inLevel = false;
 
@@ -1822,8 +1823,6 @@ static void GrowPool(int32_t type)
 static uint64_t LinkXAsset_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
                              double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
 {
-    bool owner = false;
-
 #ifdef _DEBUG
     g_linkCount.fetch_add(1, std::memory_order_relaxed);
 #endif
@@ -1839,23 +1838,20 @@ static uint64_t LinkXAsset_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
 
     if (g_usermapLevel.load(std::memory_order_relaxed) && a1 && *(const int32_t*)a1 == kScriptParseTree)
     {
-        uint64_t idle = 0;
-        owner = g_scriptLinker.compare_exchange_strong(idle, (uint64_t)scePthreadSelf(), std::memory_order_acq_rel);
+        // Each worker needs its own script-priority context. Another worker
+        // linking a script concurrently must not fall back to ordinary assets.
+        ModLoadContexts<>::Scope linking(g_scriptLinkers, (uint64_t)scePthreadSelf(), 1);
+        return ((Hook_t)g_linkOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
     }
 
-    const uint64_t result = ((Hook_t)g_linkOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
-
-    if (owner)
-        g_scriptLinker.store(0, std::memory_order_release);
-
-    return result;
+    return ((Hook_t)g_linkOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
 }
 
 static uint64_t ZonePriority_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
                                double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
 {
     const uintptr_t from = (uintptr_t)__builtin_return_address(0) - g_base;
-    const bool linkingScript = g_scriptLinker.load(std::memory_order_acquire) == (uint64_t)scePthreadSelf() &&
+    const bool linkingScript = g_scriptLinkers.Current((uint64_t)scePthreadSelf()) != 0 &&
                                from > kLinkXAsset && from < kLinkXAssetEnd;
 
     if (((uint32_t)a1 & kModMarker) != 0)
