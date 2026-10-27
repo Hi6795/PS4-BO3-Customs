@@ -150,14 +150,14 @@ static uint8_t* PixelMemory(uint64_t image)
 
     if (heap && pixels >= heap && pixels - heap < 16777224)
     {
-        if (pixels > UINTPTR_MAX - 16 || !RangeReadable((uintptr_t)pixels + 8, sizeof(uint64_t)) ||
+        if (pixels > UINTPTR_MAX - 16 ||
             g_base > UINTPTR_MAX - kGpuHeapTable || !RangeReadable(g_base + kGpuHeapTable, sizeof(uint64_t)))
             return nullptr;
 
         const uint64_t index = (*(uint64_t*)(pixels + 8) >> 2) & 0x7FFFFFFF;
         const uint64_t table = *(uint64_t*)(g_base + kGpuHeapTable);
 
-        if (!index || !table || table > UINTPTR_MAX - 16 || !RangeReadable((uintptr_t)table + 8, sizeof(uint64_t)))
+        if (!index || !table || table > UINTPTR_MAX - 16)
             return nullptr;
 
         const uint64_t tableBase = *(uint64_t*)(table + 8);
@@ -235,7 +235,7 @@ static bool ModPicturePath(const char* name, char* path, size_t size)
     return T7Maps_ModPreviewFile(value, path, size);
 }
 
-static uint64_t MakePicture(const char* name, const char** failure)
+static uint64_t MakePicture(const char* name, const char** failure, bool logFailure)
 {
     if (failure)
         *failure = nullptr;
@@ -308,9 +308,17 @@ static uint64_t MakePicture(const char* name, const char** failure)
 
     const uint64_t surfaceBytes = pitch > 0 ? (uint64_t)pitch * 4 * (uint64_t)height : 0;
 
+    // The native allocator owns this GPU surface. Validate its descriptor and
+    // capacity; a CPU-readable virtual-memory query is not its allocation contract.
     if (!pixels || imageWidth != width || imageHeight != height || pitch < width || pitch > width + 64 ||
-        surfaceBytes > bytes || surfaceBytes > SIZE_MAX || !RangeReadable((uintptr_t)pixels, (size_t)surfaceBytes))
+        surfaceBytes > bytes || surfaceBytes > SIZE_MAX)
     {
+        SceKernelVirtualQueryInfo region{};
+        const int query = pixels ? sceKernelVirtualQuery(pixels, 0, &region, sizeof(region)) : -1;
+        if (logFailure)
+            T7Log_Write("[MapImages] surface %s: image=%p pixels=%p dimensions=%dx%d expected=%dx%d pitch=%d bytes=%u need=%llu query=%d protection=0x%x region=%p-%p",
+                        name, (void*)image, pixels, imageWidth, imageHeight, width, height, pitch, bytes,
+                        (unsigned long long)surfaceBytes, query, region.protection, region.start, region.end);
         free(png);
         ReleaseImage(image);
         if (failure)
@@ -372,7 +380,7 @@ static uint64_t RetryPicture(Picture& picture)
         return 0;
 
     const char* failure = nullptr;
-    picture.image = MakePicture(picture.name, &failure);
+    picture.image = MakePicture(picture.name, &failure, !picture.failureLogged);
 
     if (picture.image)
     {

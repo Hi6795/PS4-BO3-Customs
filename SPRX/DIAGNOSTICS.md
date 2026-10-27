@@ -134,3 +134,15 @@ stat/fstat import names, and all project translation units against an existing
 SDK. See [the adapter build guide](openorbis/README.md) for commands. Console
 rendering remains a runtime validation step; the separate in-match mod crash
 reports are not proven resolved by this correction.
+
+## dev.15 remaining map-image rejection — 2026-10-27
+
+Console report: only one map image appeared restored. Saved the current authorized console log as dev12-work/dev15-mapimages-console.log. PNG truncation errors are gone, but 40 unique preview/loading names fail the next validation stage with `dynamic image pixel surface failed validation`.
+
+Reviewed against pre-regression t7_mapimages.cpp: our added generic CPU-read probes are used on engine-owned GPU handles and on the pixel output buffer. These are extra requirements beyond the working native allocator path. The generic range helper also stops after eight VM regions, making it unsuitable as a blanket test of a large output buffer. The log does not identify which subcondition failed, so do not assert a particular permission mask was observed on the console.
+
+Source correction: restore native indexed GPU-handle access without the added readability probes for GPU handle/table regions; stop requiring the output surface to pass RangeReadable. Keep the readable native image-object/global-pointer checks, null/index/address-overflow guards, image dimension/pitch/capacity checks, and stat ABI correction. Add rate-limited descriptor diagnostics if any native metadata validation still rejects an image. A proposed global RangeWritable/helper rewrite was reviewed and discarded before commit to avoid unrelated changes to platform memory checking.
+
+Validation: map_image_surface_checks.py compiles the real resolver and scaler under AddressSanitizer/UBSan. Direct and indexed output surfaces work when the generic read probe denies GPU-handle/output access; null handles and overflow fail safely. All 14 local preview/loading PNGs render at both output sizes with canaries intact. All 14 PS4 source translation units pass actual target-header syntax checks. This is source validation; runtime coverage of every console map is pending.
+
+Fork report #17 remains open for console validation: https://github.com/Zorian1337/PS4-BO3-Customs/issues/17. No upstream PR. No new console package built or uploaded: next version is dev.16 and requires the user's per-build approval. Test previews throughout the map list and loading images after restarting with only the corrected plugin version active. Preserve dev.15 locally for comparison if a later build clears the output directory.
