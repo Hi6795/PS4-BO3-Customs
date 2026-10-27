@@ -4047,9 +4047,10 @@ static void ReloadFrontend(const char* why)
 
     T7Log_Write("[Mods] %s; reloading the menus the way PC does after a mod change", why);
 
-    g_quietReload = g_playMovieOriginal != nullptr;
+    const bool previousQuiet = g_quietReload;
+    g_quietReload = previousQuiet || g_playMovieOriginal != nullptr;
     ((void (*)(uint64_t))(g_base + kKillServer))(0);
-    g_quietReload = false;
+    g_quietReload = previousQuiet;
     g_unshownCount = 0;
 }
 

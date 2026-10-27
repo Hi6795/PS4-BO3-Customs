@@ -1,0 +1,20 @@
+name: Frontend reload state regression
+on:
+  push:
+    paths:
+      - 'SPRX/t7_maps.cpp'
+      - 'SPRX/tests/frontend_reload_checks.py'
+      - '.github/workflows/frontend-reload.yml'
+  pull_request:
+    paths:
+      - 'SPRX/t7_maps.cpp'
+      - 'SPRX/tests/frontend_reload_checks.py'
+      - '.github/workflows/frontend-reload.yml'
+jobs:
+  reload:
+    runs-on: ubuntu-latest
+    env:
+      ASAN_OPTIONS: detect_leaks=0
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 SPRX/tests/frontend_reload_checks.py
