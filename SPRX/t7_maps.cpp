@@ -1550,6 +1550,39 @@ static bool ScriptBase(const char* name, char* base, size_t size)
     return true;
 }
 
+static int ScriptOwner(const char* script)
+{
+    if (!script || !RangeReadable((uintptr_t)script, 1))
+        return -1;
+    char copy[kNameMax];
+    size_t length = 0;
+    for (; length + 1 < sizeof(copy); ++length)
+    {
+        const uintptr_t address = (uintptr_t)script + length;
+        if (address < (uintptr_t)script || !RangeReadable(address, 1))
+            return -1;
+        copy[length] = script[length];
+        if (!copy[length]) break;
+    }
+    if (length + 1 >= sizeof(copy)) return -1;
+    int stacked = -1;
+    const int prefix = StackPrefix(copy, &stacked);
+    char base[kInternedMax];
+    if (!ScriptBase(copy + prefix, base, sizeof(base))) return -1;
+    if (g_claimLock.exchange(true, std::memory_order_acquire)) return -2;
+    int owner = -1;
+    for (int i = 0; i < g_scriptClaimCount; ++i)
+    {
+        if (strcmp(g_scriptClaims[i].base, base) == 0)
+        {
+            owner = g_scriptClaims[i].owner;
+            break;
+        }
+    }
+    g_claimLock.store(false, std::memory_order_release);
+    return owner;
+}
+
 static void ClaimStackScript(uintptr_t header, int index)
 {
     const char* const name = *(const char* const*)header;
@@ -3625,10 +3658,32 @@ static void WaitForModZones(const ZoneInfo* zones, int count, int from)
     }
 }
 
+static void TraceModTransition(const char* when, const char* level);
+
 static uint64_t LoadXAssets_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
                               double x0, double x1, double x2, double x3, double x4, double x5, double x6,
                               double x7)
 {
+#ifdef _DEBUG
+    if (a1 && (int)(uint32_t)a2 > 0 && (int)(uint32_t)a2 <= kMaxZoneCall &&
+        (g_modCount > 0 || g_loadedCount > 0))
+    {
+        const ZoneInfo* const requested = (const ZoneInfo*)a1;
+        for (int i = 0; i < (int)(uint32_t)a2; ++i)
+        {
+            const char* const name = requested[i].name;
+            if (!name) continue;
+            if (EqualsNoCase(name, "core_frontend") || EqualsNoCase(name, "zm_common") ||
+                EqualsNoCase(name, "mp_common") || EqualsNoCase(name, "cp_common"))
+            {
+                T7Log_Write("[Transition] requested zone %s: alloc=0x%X free=0x%X",
+                            name, (unsigned)requested[i].allocFlags, (unsigned)requested[i].freeFlags);
+                TraceModTransition("zone request", name);
+                break;
+            }
+        }
+    }
+#endif
     ZoneInfo withMods[kMaxZoneCall];
     const uint64_t self = (uint64_t)scePthreadSelf();
 
@@ -4357,15 +4412,70 @@ static void ApplyModsNow()
         ReloadFrontend("a mod with menu files was unloaded");
 }
 
+static void TraceModTransition(const char* when, const char* level)
+{
+#ifdef _DEBUG
+    if (!g_base) return;
+    const int loadedMode = LoadedModeCommon();
+    const int sessionMode = SessionModeCommon();
+    char names[kMaxStack][kNameMax];
+    const int wanted = ChosenForLoad(names);
+    uint32_t modZones = 0;
+    bool zoneLoaded[kModZoneKinds] = {};
+    for (int i = 0; i < kModZoneKinds; ++i)
+    {
+        zoneLoaded[i] = ZoneLoaded(k_modZones[i]);
+        if (zoneLoaded[i]) modZones |= 1u << i;
+    }
+    const uint32_t sessionBits = *(const uint32_t*)(g_base + kSessionModes);
+    T7Log_Write("[Transition] %s %s: session=%s bits=0x%X loaded-common=%s selected=%d loaded=%d "
+                "core-mod=%d zm-mod=%d mp-mod=%d cp-mod=%d mod-zone-mask=0x%X "
+                "common-on-top=%d pending-reload=%d waiting-zones=%d apply-wanted=%d",
+                when, level ? level : "(none)", sessionMode > 0 ? k_modeCommons[sessionMode] : "unknown",
+                sessionBits, loadedMode > 0 ? k_modeCommons[loadedMode] : "none", wanted, g_loadedCount,
+                zoneLoaded[0] ? 1 : 0, zoneLoaded[1] ? 1 : 0, zoneLoaded[2] ? 1 : 0, zoneLoaded[3] ? 1 : 0,
+                modZones, ModeCommonOnTop() ? 1 : 0, g_reloadCheck ? 1 : 0, g_waitZoneCount,
+                g_applyWanted.load(std::memory_order_acquire) ? 1 : 0);
+    for (int i = 0; i < wanted && i < kMaxStack; ++i)
+        T7Log_Write("[Transition] selected mod %d: %s", i + 1, names[i]);
+    for (int i = 0; i < g_loadedCount && i < kMaxStack; ++i)
+        T7Log_Write("[Transition] loaded mod %d: %s", i + 1, g_loaded[i]);
+    T7Lua_TraceState(when);
+#else
+    (void)when;
+    (void)level;
+#endif
+}
+
 static uint64_t LoadLevelZones_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
                                  double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
 {
     const char* const level = (const char*)a1;
-
-    if (level && RangeReadable(a1, 1) && level[0] && !EqualsNoCase(level, "core_frontend"))
+    const bool named = level && RangeReadable(a1, 1) && level[0];
+#ifdef _DEBUG
+    char diagnosticLevel[kNameMax];
+    snprintf(diagnosticLevel, sizeof(diagnosticLevel), "%.*s", (int)sizeof(diagnosticLevel) - 1,
+             named && RangeReadable(a1, sizeof(diagnosticLevel)) ? level : "(unnamed/unreadable)");
+    if (named)
+        TraceModTransition("before level zones", diagnosticLevel);
+#endif
+    if (named && !EqualsNoCase(level, "core_frontend"))
+    {
         ApplyModsBeforeLevel(level);
-
-    return ((Hook_t)g_levelZonesOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
+#ifdef _DEBUG
+        TraceModTransition("prepared level zones", diagnosticLevel);
+#endif
+    }
+    const uint64_t result = ((Hook_t)g_levelZonesOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
+#ifdef _DEBUG
+    if (named)
+    {
+        T7Log_Write("[Transition] native level-zone result for %s: 0x%llX", diagnosticLevel,
+                    (unsigned long long)result);
+        TraceModTransition("after level zones", diagnosticLevel);
+    }
+#endif
+    return result;
 }
 
 static uint64_t BlockJob_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
@@ -6151,6 +6261,17 @@ static void InstallHooks(uintptr_t base)
     }
 #endif
 }
+}
+
+int T7Maps_ScriptOwner(const char* script)
+{
+    using namespace T7Maps;
+    return ScriptOwner(script);
+}
+
+void T7Maps_TraceDiagnostics(const char* reason)
+{
+    T7Maps::TraceModTransition(reason ? reason : "diagnostic snapshot", nullptr);
 }
 
 void T7Maps_Install(uintptr_t base)
