@@ -271,9 +271,9 @@ def main():
     add_pc_util = extract_function(lua, "static void AddPcUtil()\n{")
     assert "UiTryLock" not in trace_locked and "UiUnlock" not in trace_locked
     assert "UiTryLock()" in trace and "TraceStateLocked(reason);" in trace and "UiUnlock();" in trace
-    assert ('if (fresh)\\n        {\\n'
-            '            T7Log_Write("[Lua] new UI state for %s", (const char*)(g_base + kCurrentMap));\\n'
-            '            TraceStateLocked("new UI state");\\n'
+    assert ('if (fresh)\n        {\n'
+            '            T7Log_Write("[Lua] new UI state for %s", (const char*)(g_base + kCurrentMap));\n'
+            '            TraceStateLocked("new UI state");\n'
             '        }') in add_pc_util
     assert "utility-matches-current=%d" in trace_locked
     assert "mouse-matches-current=%d" in trace_locked
