@@ -135,14 +135,30 @@ SDK. See [the adapter build guide](openorbis/README.md) for commands. Console
 rendering remains a runtime validation step; the separate in-match mod crash
 reports are not proven resolved by this correction.
 
-## dev.15 remaining map-image rejection — 2026-10-27
+## Native GPU image surfaces
 
-Console report: only one map image appeared restored. Saved the current authorized console log as dev12-work/dev15-mapimages-console.log. PNG truncation errors are gone, but 40 unique preview/loading names fail the next validation stage with `dynamic image pixel surface failed validation`.
+The dev.15 console log contained 40 unique preview/loading image names rejected
+with `dynamic image pixel surface failed validation`, after PNG parsing had
+recovered. Generic CPU-read probes on GPU handles and the output surface added
+requirements absent from the native image allocator's contract. The read helper
+also stops after eight virtual-memory regions. The grouped error did not identify
+a specific failing permission mask or descriptor field.
 
-Reviewed against pre-regression t7_mapimages.cpp: our added generic CPU-read probes are used on engine-owned GPU handles and on the pixel output buffer. These are extra requirements beyond the working native allocator path. The generic range helper also stops after eight VM regions, making it unsuitable as a blanket test of a large output buffer. The log does not identify which subcondition failed, so do not assert a particular permission mask was observed on the console.
+GPU handles now follow the native indexed resolution path without those extra
+read probes. The image-object/global-pointer checks, null/index/address-overflow
+guards, dimensions, pitch and capacity checks remain. Remaining rejections log
+their descriptor details once, and failed pictures can retry after two seconds.
 
-Source correction: restore native indexed GPU-handle access without the added readability probes for GPU handle/table regions; stop requiring the output surface to pass RangeReadable. Keep the readable native image-object/global-pointer checks, null/index/address-overflow guards, image dimension/pitch/capacity checks, and stat ABI correction. Add rate-limited descriptor diagnostics if any native metadata validation still rejects an image. A proposed global RangeWritable/helper rewrite was reviewed and discarded before commit to avoid unrelated changes to platform memory checking.
+`python3 SPRX/tests/map_image_surface_checks.py [PNG ...]` compiles the actual
+resolver and scaler under AddressSanitizer/UBSan. Direct and indexed handles
+resolve even when a generic CPU-read probe cannot certify their GPU-owned
+regions; null handles and overflowing addresses are rejected. Fourteen local
+PNG samples rendered at both preview/loading sizes with output canaries intact.
+All 14 PS4 translation units passed target syntax checks; the Debug SPRX linked
+and passed native artifact validation, including six malformed-container checks.
 
-Validation: map_image_surface_checks.py compiles the real resolver and scaler under AddressSanitizer/UBSan. Direct and indexed output surfaces work when the generic read probe denies GPU-handle/output access; null handles and overflow fail safely. All 14 local preview/loading PNGs render at both output sizes with canaries intact. All 14 PS4 source translation units pass actual target-header syntax checks. This is source validation; runtime coverage of every console map is pending.
-
-Fork report #17 remains open for console validation: https://github.com/Zorian1337/PS4-BO3-Customs/issues/17. No upstream PR. No new console package built or uploaded: next version is dev.16 and requires the user's per-build approval. Test previews throughout the map list and loading images after restarting with only the corrected plugin version active. Preserve dev.15 locally for comparison if a later build clears the output directory.
+On 2026-10-27, the console tester confirmed that dev.16 restored map images.
+That package used source `5c3dd70434d128f5d2b51e0f1445770963656512`, with SHA-256
+`b1d236bfd421900ae00c6aedd6937314543c805d11da4c60b5faa32ede3637cb`.
+This confirms the reported image regression; it does not validate unrelated
+gameplay crash reports. See [fork issue 17](https://github.com/Zorian1337/PS4-BO3-Customs/issues/17).
