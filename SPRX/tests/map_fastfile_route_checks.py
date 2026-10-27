@@ -37,6 +37,7 @@ static int g_packageCount=1;
 static File g_files[kMaxFiles] = {};
 static int g_fileCount=kMaxFiles;
 struct ListReader { ListReader() {} };
+static uint64_t sceKernelGetProcessTime() { return 5000000; }
 static bool overrideEnabled=false, exists=true;
 static File overrideFile={"zm_ds_house_zw.ff", "/data/mod-overrides/zm_ds_house_zw.ff", 0};
 static std::string actualPath;
@@ -77,6 +78,25 @@ static bool LanguagePrefixed(const char*);
 MAIN = r'''
 int main()
 {
+    std::strcpy(g_files[0].rel, "core_frontend.ff");
+    std::strcpy(g_files[0].path, "/ext0/BO3-Customs/zone/core_frontend.ff");
+    std::strcpy(g_files[1].rel, "en_core_frontend.ff");
+    std::strcpy(g_files[1].path, "/ext0/BO3-Customs/zone/en_core_frontend.ff");
+    std::strcpy(g_files[2].rel, "core_mod.ff");
+    std::strcpy(g_files[2].path, "/ext0/BO3-Customs/zone/core_mod.ff");
+    assert(NativeBootstrapFile("core_frontend.ff"));
+    assert(NativeBootstrapFile("en_core_frontend.ff"));
+    assert(NativeBootstrapFile("snd/en/core_frontend.sabl"));
+    assert(!NativeBootstrapFile("core_mod.ff"));
+    assert(!NativeBootstrapFile("zm_ds_house_zw.ff"));
+    const char* const coreRequest="/app0/zone/core_frontend.ff";
+    assert(FileOpen_h((uintptr_t)coreRequest,0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
+    assert(actualPath==coreRequest);
+    const char* const localizedCore="/app0/zone/en_core_frontend.ff";
+    assert(FileOpen_h((uintptr_t)localizedCore,0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
+    assert(actualPath==localizedCore);
+    assert(FileOpen_h((uintptr_t)"/app0/zone/core_mod.ff",0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
+    assert(actualPath==g_files[2].path);
     assert(MapPackageFile("zm_ds_house_zw.ff")==0);
     assert(MapPackageFile("en_zm_ds_house_zw.ff")==0);
     assert(MapPackageFile("zm_ds_house_zw.fd")==0);
@@ -110,7 +130,8 @@ int main()
 
 
 def main():
-    snippets = [extract("static bool IsZoneFile("), extract("static int MapPackage("),
+    snippets = [extract("static bool IsZoneFile("), extract("static bool NativeBootstrapFile("),
+                extract("static int MapPackage("),
                 extract("static bool LanguagePrefixed(const char* name)\n{"),
                 extract("static int MapPackageFile("), extract("static uint64_t FileOpen_h(")]
     with tempfile.TemporaryDirectory(prefix="bo3-ff-route-") as temporary:
