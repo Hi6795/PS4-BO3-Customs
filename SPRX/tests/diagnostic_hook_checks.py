@@ -266,9 +266,9 @@ def main():
     assert 'T7Maps_TraceDiagnostics("clientfield mismatch")' in LOG
     assert "owner=%s" in LOG
     lua = (ROOT / "t7_lua.cpp").read_text()
-    trace_locked = extract_function(lua, "static void TraceStateLocked(const char* reason)\\n{")
-    trace = extract_function(lua, "void T7Lua_TraceState(const char* reason)\\n{")
-    add_pc_util = extract_function(lua, "static void AddPcUtil()\\n{")
+    trace_locked = extract_function(lua, "static void TraceStateLocked(const char* reason)\n{")
+    trace = extract_function(lua, "void T7Lua_TraceState(const char* reason)\n{")
+    add_pc_util = extract_function(lua, "static void AddPcUtil()\n{")
     assert "UiTryLock" not in trace_locked and "UiUnlock" not in trace_locked
     assert "UiTryLock()" in trace and "TraceStateLocked(reason);" in trace and "UiUnlock();" in trace
     assert 'TraceStateLocked("new UI state");' in add_pc_util
@@ -286,7 +286,7 @@ def main():
             maps, "static void TraceModTransition(const char* when, const char* level)\n{"
         )
         level_hook = extract_function(maps, "static uint64_t LoadLevelZones_h(")
-        source.write_text(TRANSITION_PREFIX + "namespace T7Lua {\\n" + trace_locked + "\\n}\\n"
+        source.write_text(TRANSITION_PREFIX + "namespace T7Lua {\n" + trace_locked + "\n}\n"
                           + trace + TRANSITION_SUFFIX + transition + TRANSITION_MAIN
                           + level_hook + TRANSITION_END)
         subprocess.run([os.environ.get("CXX", "g++"), "-std=c++20", "-Wall", "-Wextra", "-Werror",
