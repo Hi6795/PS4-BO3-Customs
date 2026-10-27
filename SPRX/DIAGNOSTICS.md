@@ -107,3 +107,30 @@ and tick bodies with host stubs. It covers message ordering, failed Lua calls,
 gameplay with no available UI and menu routing. Native toolchain/console
 validation is still required; this change captures diagnostics, not a claim
 that the underlying native crash is fixed.
+
+## OpenOrbis file-size ABI regression
+
+The dev.12–dev.14 OpenOrbis builds used an adapter alias to the SDK's libc
+`struct stat`. Under the project's include order it has a 32-bit mode,
+128-byte total size and `st_size` at offset 80. The native PS4 kernel record
+has a 16-bit mode, 120-byte size and `st_size` at offset 72; offset 80 is
+`st_blocks`. The wrong alias makes preview reads use the allocation-block
+count as bytes. In dev.14 this produced `[MapImages] ... a chunk runs past
+the end of the file` across the custom map previews.
+
+The OpenOrbis adapter now defines the complete native record using fixed-width
+fields and compile-time size/offset assertions. Both `sceKernelStat` and
+`sceKernelFstat` bind to that record with their original import names. This
+also corrects file lengths used by map sharing. It does not establish that
+an existing on-disk PNG is damaged; the previous reader truncated its input
+in memory. Files sent through the affected sharing code need independent
+validation before assuming they are complete.
+
+`SPRX/tests/kernel_stat_abi_checks.cpp` serializes an independent native-record
+fixture and reproduces the old incorrect PNG byte count. The same parser
+accepts all 14 local preview/loading samples with the corrected byte count.
+`SPRX/tests/openorbis_header_checks.py` checks the actual target headers,
+stat/fstat import names, and all project translation units against an existing
+SDK. See [the adapter build guide](openorbis/README.md) for commands. Console
+rendering remains a runtime validation step; the separate in-match mod crash
+reports are not proven resolved by this correction.
