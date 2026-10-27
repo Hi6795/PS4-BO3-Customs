@@ -1,0 +1,20 @@
+name: Mod stack transaction regression
+on:
+  push:
+    paths:
+      - 'SPRX/t7_maps.cpp'
+      - 'SPRX/tests/mod_stack_transaction_checks.py'
+      - '.github/workflows/mod-stack-transaction.yml'
+  pull_request:
+    paths:
+      - 'SPRX/t7_maps.cpp'
+      - 'SPRX/tests/mod_stack_transaction_checks.py'
+      - '.github/workflows/mod-stack-transaction.yml'
+jobs:
+  transaction:
+    runs-on: ubuntu-latest
+    env:
+      ASAN_OPTIONS: detect_leaks=0
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 SPRX/tests/mod_stack_transaction_checks.py

@@ -3515,16 +3515,54 @@ static int AddModZones(const ZoneInfo* zones, int count, ZoneInfo* out)
     if (room <= 0 || count + room > kMaxZoneCall)
         return 0;
 
-    BeginListWrite();
-    SetStack(names, wanted);
-    EndListWrite();
-    ResetScriptClaims();
+    const int recordsAvailable = ZoneRecordsFree() - 2 * count;
 
+    if (recordsAvailable <= 0)
+        return 0;
+
+    // A rejected plan must not discard file redirects or claims belonging
+    // to the still-loaded stack. Keep a bounded snapshot until planning succeeds.
+    const int previousCount = g_stackCount;
+    StackMod* previous = nullptr;
+
+    if (previousCount > 0)
+    {
+        previous = (StackMod*)malloc((size_t)previousCount * sizeof(StackMod));
+
+        if (!previous)
+        {
+            T7Log_Write("[Mods] cannot save the active stack; retaining loaded mods");
+            return 0;
+        }
+    }
+
+    BeginListWrite();
+
+    if (previous)
+        memcpy(previous, g_stack, (size_t)previousCount * sizeof(StackMod));
+
+    SetStack(names, wanted);
     memcpy(out, zones, (size_t)count * sizeof(ZoneInfo));
-    int records = ZoneRecordsFree() - 2 * count;
+    int records = recordsAvailable;
     int through = 0;
     const int added = StackEntries(0, mode, out + count, room, &records, &through);
-    SetLoaded(added > 0 ? through : 0);
+
+    if (added == 0)
+    {
+        if (previous)
+            memcpy(g_stack, previous, (size_t)previousCount * sizeof(StackMod));
+
+        g_stackCount = previousCount;
+    }
+
+    EndListWrite();
+    free(previous);
+
+    if (added == 0)
+        return 0;
+
+    ResetScriptClaims();
+    SetLoaded(through);
 
     if (added > 0 && through < g_stackCount)
         g_applyWanted.store(true);
@@ -3815,7 +3853,25 @@ static void AppendMods(const char (*names)[kNameMax], int wanted, int mode)
 {
     const int from = g_loadedCount;
 
+    const int previousCount = g_stackCount;
+    StackMod* previous = nullptr;
+
+    if (previousCount > 0)
+    {
+        previous = (StackMod*)malloc((size_t)previousCount * sizeof(StackMod));
+
+        if (!previous)
+        {
+            T7Log_Write("[Mods] cannot save the active stack before appending; retaining loaded mods");
+            return;
+        }
+    }
+
     BeginListWrite();
+
+    if (previous)
+        memcpy(previous, g_stack, (size_t)previousCount * sizeof(StackMod));
+
     SetStack(names, wanted);
     EndListWrite();
 
@@ -3848,6 +3904,28 @@ static void AppendMods(const char (*names)[kNameMax], int wanted, int mode)
 
         at = through;
     }
+
+    if (g_loadedCount < g_stackCount)
+    {
+        BeginListWrite();
+
+        if (g_loadedCount == from)
+        {
+            if (previous)
+                memcpy(g_stack, previous, (size_t)previousCount * sizeof(StackMod));
+
+            g_stackCount = previousCount;
+        }
+        else
+        {
+            // Only the accepted prefix can provide file redirects.
+            g_stackCount = g_loadedCount;
+        }
+
+        EndListWrite();
+    }
+
+    free(previous);
 
     if (loads == 0 && g_loadedCount > from)
         T7Log_Write("[Mods] the newly ticked mods have nothing for %s", k_modeCommons[mode]);
@@ -4092,9 +4170,10 @@ static void ReloadFrontend(const char* why)
 
     T7Log_Write("[Mods] %s; reloading the menus the way PC does after a mod change", why);
 
-    g_quietReload = g_playMovieOriginal != nullptr;
+    const bool previousQuiet = g_quietReload;
+    g_quietReload = previousQuiet || g_playMovieOriginal != nullptr;
     ((void (*)(uint64_t))(g_base + kKillServer))(0);
-    g_quietReload = false;
+    g_quietReload = previousQuiet;
     g_unshownCount = 0;
 }
 
