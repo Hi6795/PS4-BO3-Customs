@@ -65,6 +65,10 @@ static void* start_thread(void*)
 
    bool is_ps5 = false;
    int fd = sceKernelOpen(path, SCE_KERNEL_O_RDONLY, 0);
+   constexpr size_t kDriveCount = sizeof(k_driveRoots) / sizeof(k_driveRoots[0]);
+#ifdef _DEBUG
+   int mountResults[kDriveCount] = {};
+#endif
 
    if (fd >= 0)
    {
@@ -74,25 +78,38 @@ static void* start_thread(void*)
 
    if (!is_ps5)
    {
-       for (const char* const drive : k_driveRoots)
+       for (size_t i = 0; i < kDriveCount; ++i)
        {
+           const char* const drive = k_driveRoots[i];
            char mnt[128];
            int len = snprintf(mnt, sizeof(mnt), "/mnt/%s", drive);
 
            if (len < 0 || static_cast<size_t>(len) >= sizeof(mnt))
                continue;
 
-           char sandboxPath[128];
-           len = snprintf(sandboxPath, sizeof(sandboxPath), "/%s", drive);
-
-           if (len < 0 || static_cast<size_t>(len) >= sizeof(sandboxPath))
-               continue;
-           
+#ifdef _DEBUG
+           mountResults[i] = jbc_mount_in_sandbox(mnt, drive);
+#else
            jbc_mount_in_sandbox(mnt, drive);
+#endif
        }
    }
 
     T7Log_Install(base);
+#ifdef _DEBUG
+    if (!is_ps5)
+    {
+        for (size_t i = 0; i < kDriveCount; ++i)
+        {
+            char root[96];
+            snprintf(root, sizeof(root), "/%s/BO3-Customs", k_driveRoots[i]);
+            SceKernelStat st{};
+            const bool accessible = sceKernelStat(root, &st) == 0 && SCE_KERNEL_S_ISDIR(st.st_mode);
+            T7Log_Write("[Storage] /%s <- /mnt/%s: mount result=%d, BO3-Customs=%s",
+                        k_driveRoots[i], k_driveRoots[i], mountResults[i], accessible ? "accessible" : "not found");
+        }
+    }
+#endif
     T7Maps_Install(base);
     T7MapImages_Install(base);
     T7Lua_Install(base);
