@@ -30,6 +30,10 @@ bool T7Maps_ModPreviewFile(uint32_t key, char* path, size_t size);
 
 void T7Maps_FrameHeartbeat();
 
+int T7Maps_ScriptOwner(const char* script);
+
+void T7Maps_TraceDiagnostics(const char* reason);
+
 void T7Maps_FrameWork();
 
 void T7Maps_RequestApply();
