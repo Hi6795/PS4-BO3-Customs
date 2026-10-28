@@ -50,3 +50,20 @@ Scope: **Zorian1337/PS4-BO3-Customs only**. Do not write to Hi6795 or ItsJokerZz
 **Experimental source fix:** `FindPackageFile` now rejects truncated paths/non-regular files, and a missing per-map asset cannot resolve to a global registry entry owned by another package. Focused host regression includes foreign-package collision and same-package fallback. It addresses an invalid routing risk, not a confirmed cause of the observed stall.
 
 **Next diagnostic evidence:** Capture post-open read errors/latency for external files, active DB/asset phase before watchdog snapshot, and the PS4 client's native crash exception PC/LR/stack. Compare identical converted map binaries on internal and external storage without mods.
+
+## Oct 28 asset pool and available-memory investigation
+
+The existing `SPRX/t7_maps.cpp` already has an on-demand pool extender, `GrowPool`, for selected asset types. It checks an expected pool element size/base limit and extends a drained free list through PS4 `sceKernelMmap`; its intended per-type cap is approximately one additional original pool's capacity (minimum 64 elements). This is **asset-count capacity**, not a reservation of additional game RAM. It does not reclaim or resize the engine's other memory arenas.
+
+**Implemented, pending console stress test:**
+- Serialize plugin-side free-list growth so two asset-link workers do not independently install new free-list chains.
+- Clamp each growth batch to the remaining per-type allowed capacity, preventing limit overshoot when the cap is not a multiple of the batch size.
+- Check limit arithmetic and mmap allocation-size arithmetic; report the size of a successful allocation in bytes for log-based diagnosis.
+
+**Not established / not implemented:**
+- Discord discussion's claim that 5 GB is reserved and half unused is not independently confirmed from this BO3 EBOOT or console memory telemetry. Do not reclaim/reclassify unknown game or system memory regions.
+- No global pool-size increase, expanded RAM allowance, or patch to proprietary OS memory budgets was made.
+- The native game's own free-list access and possible background allocators need hardware stress testing; serializing the plugin's growth calls does not prove the engine's allocator synchronization.
+- More usable game memory does not automatically fix external-storage stalls: confirm read I/O and asset linking separately.
+
+Recommended test: load the same converted map internally and externally, monitor `[Pools]` growth and exhausted-pool messages, collect a native crash dump and read-path timing if hangs persist.
