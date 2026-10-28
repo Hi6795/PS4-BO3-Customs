@@ -800,6 +800,16 @@ static int ListFolder(const char* folder, bool folders, char names[][kListedName
     if (fd < 0)
         return 0;
 
+    // ScanAll can be invoked by refresh paths while another scan is active.
+    // Serialize access to the shared 64 KiB getdents buffer.
+    static std::atomic_flag directoryBufferLock = ATOMIC_FLAG_INIT;
+    while (directoryBufferLock.test_and_set(std::memory_order_acquire))
+        sceKernelUsleep(50);
+    struct UnlockDirectoryBuffer
+    {
+        std::atomic_flag& flag;
+        ~UnlockDirectoryBuffer() { flag.clear(std::memory_order_release); }
+    } unlock{directoryBufferLock};
     static char buffer[0x10000];
     int count = 0;
 
@@ -819,16 +829,27 @@ static int ListFolder(const char* folder, bool folders, char names[][kListedName
             if (entry->d_reclen < 8 || entry->d_reclen > n - at)
                 break;
 
+            const size_t header = (size_t)((const char*)entry->d_name - (const char*)entry);
+            if (header >= entry->d_reclen)
+                break;
+            const size_t available = entry->d_reclen - header;
+            const char* const terminator = (const char*)memchr(entry->d_name, 0, available);
+            if (!terminator)
+                break;
+            const size_t nameLength = (size_t)(terminator - entry->d_name);
             at += entry->d_reclen;
 
-            if (entry->d_fileno == 0 || entry->d_name[0] == '.')
+            if (entry->d_fileno == 0 || !nameLength || entry->d_name[0] == '.')
                 continue;
 
-            if ((entry->d_type == SCE_KERNEL_DT_DIR) != folders || strlen(entry->d_name) >= kListedNameMax)
+            if ((entry->d_type == SCE_KERNEL_DT_DIR) != folders || nameLength >= kListedNameMax)
                 continue;
 
             if (count < capacity)
-                snprintf(names[count++], kListedNameMax, "%s", entry->d_name);
+            {
+                memcpy(names[count], entry->d_name, nameLength);
+                names[count++][nameLength] = 0;
+            }
         }
     }
 
