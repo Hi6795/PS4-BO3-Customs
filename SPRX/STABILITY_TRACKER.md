@@ -15,6 +15,10 @@ Scope: **Zorian1337/PS4-BO3-Customs only**. Do not write to Hi6795 or ItsJokerZz
 
 | S03 | Sharing init | Retry unavailable imports and server-thread start without duplicate asks worker or repeated peer reset; five-second retries from frame tick | Implemented; console test pending |
 
+| M03 | Optional hooks | Attempt optional signature-gated map hook installation on later map refresh, even when required hooks already installed | Implemented; native and console tests pending |
+| M04 | Map init | Failed `BuildMatches` probe no longer permanently marks initialization done | Implemented; tests pending |
+| H08 | Detour failure | An unrecoverable partial target patch now retains its owning detour record and mapping so duplicate attachment is blocked | Implemented; fault-injection tests pending |
+
 ## Follow-up risks (no claim of resolution)
 
 | ID | Area | Investigation/action |
