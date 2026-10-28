@@ -37,6 +37,8 @@
     <ClInclude Include="t7_maps.hpp" />
     <ClInclude Include="t7_mapimages.hpp" />
     <ClInclude Include="t7_lua.hpp" />
+    <ClInclude Include="t7_lua_files.hpp" />
+    <ClInclude Include="diagnostic_ring.hpp" />
     <ClInclude Include="t7_kbm.hpp" />
     <ClInclude Include="t7_kbm_strings.hpp" />
     <ClInclude Include="t7_log.hpp" />

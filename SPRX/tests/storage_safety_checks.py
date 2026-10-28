@@ -239,6 +239,47 @@ int main() {
     std::puts("PASS: chosen-mod selection survives write/flush/close/rename failures and short writes");
 }
 ''')
+# Execute the real startup entry point with a stale, undeletable selection file.
+# Filesystem cleanup must never be a prerequisite for recovering from a bad mod.
+startup = maps[maps.index("void T7Maps_Install(uintptr_t base)"):maps.index("bool T7Maps_Refresh()")]
+run("mod-startup-recovery", r'''
+#include <cassert>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+namespace T7Maps {
+static bool g_buildMatched=false, compatible=false;
+static uintptr_t g_base=0;
+static int g_chosenCount=3, scans=0, hooks=0, unlinks=0;
+static const char k_chosenModFile[]="/data/BO3-Customs/active_mod.txt";
+static bool BuildMatches(uintptr_t) { return compatible; }
+static int sceKernelUnlink(const char* path) {
+    assert(std::strcmp(path,k_chosenModFile)==0);
+    ++unlinks;
+    return -1; // Recovery must work even on a read-only or failing disk.
+}
+static void T7Log_Write(const char*, ...) {}
+static void ScanAll() { assert(g_chosenCount==0); ++scans; }
+static void InstallHooks(uintptr_t base) {
+    assert(base==g_base && g_chosenCount==0); ++hooks;
+}
+}
+''' + startup + r'''
+int main() {
+    using namespace T7Maps;
+    T7Maps_Install(0);
+    T7Maps_Install(1); // An incompatible probe must not prevent a later retry.
+    assert(!g_base && !scans && !hooks && !unlinks);
+    compatible=true;
+    T7Maps_Install(1);
+    assert(g_buildMatched && g_base==1 && g_chosenCount==0);
+    assert(scans==1 && hooks==1 && unlinks==1);
+    g_chosenCount=2; // A later menu selection is not reset by repeated install calls.
+    T7Maps_Install(1);
+    assert(g_chosenCount==2 && scans==1 && hooks==1 && unlinks==1);
+    std::puts("PASS: cold startup disables stale mods despite failed file deletion; install remains retryable/idempotent");
+}
+''')
 locks = maps[maps.index("static std::atomic<int32_t> g_listReaders"):maps.index("static Detour g_openDetour")]
 builder = maps[maps.index("static void BuildModsLua()"):maps.index("static uint64_t MapsTable_h(")]
 assert "ListReader reading;" in builder

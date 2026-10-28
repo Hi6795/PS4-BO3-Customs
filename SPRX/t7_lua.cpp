@@ -3,6 +3,7 @@
 #include "t7_maps.hpp"
 #include "t7_config.hpp"
 #include "t7_share_lua.hpp"
+#include "t7_lua_files.hpp"
 #include <system_service.h>
 
 #include <atomic>
@@ -1859,38 +1860,10 @@ static bool RunLua(const char* source, const char* chunk)
 
 static char* ReadScript(const char* name)
 {
-    char path[256];
-    snprintf(path, sizeof(path), "%s/ui_scripts/%s", "/data/BO3-Customs", name);
-
-    const int fd = sceKernelOpen(path, SCE_KERNEL_O_RDONLY, 0);
-
-    if (fd < 0)
-        return nullptr;
-
-    constexpr size_t kMax = 256 * 1024;
-    char* const text = (char*)malloc(kMax + 1);
-    size_t done = 0;
-
-    while (text && done < kMax)
-    {
-        const int64_t got = sceKernelRead(fd, text + done, kMax - done);
-
-        if (got <= 0)
-            break;
-
-        done += (size_t)got;
-    }
-
-    sceKernelClose(fd);
-
-    if (!text || !done)
-    {
-        free(text);
-        return nullptr;
-    }
-
-    text[done] = 0;
-    return text;
+    char relative[256];
+    const int length = snprintf(relative, sizeof(relative), "ui_scripts/%s", name);
+    return length > 0 && (size_t)length < sizeof(relative)
+        ? T7LuaFiles::Read(relative, 256 * 1024) : nullptr;
 }
 
 static bool AppendLuaFormat(char* out, size_t size, size_t* used, const char* format, ...)
@@ -2600,7 +2573,7 @@ static void PollGraphics()
     ApplySplitScreen();
 }
 
-static int OpenLuiCopy(const char* asset)
+static char* ReadLuiCopy(const char* asset, size_t* length)
 {
     char lower[160];
     size_t n = 0;
@@ -2618,19 +2591,18 @@ static int OpenLuiCopy(const char* asset)
 
     lower[n] = 0;
 
+    if (asset[n] || !T7LuaFiles::SafePath(lower, false))
+        return nullptr;
+
     const char* const slash = strrchr(lower, '/');
 
     if (folders > kLuiMaxFolders && slash)
         memmove(lower + cut, slash, strlen(slash) + 1);
 
-    char path[256];
-    snprintf(path, sizeof(path), "%s/lui/%s", "/data/BO3-Customs", lower);
-    const int fd = sceKernelOpen(path, SCE_KERNEL_O_RDONLY, 0);
-
-    if (fd < 0 && fd != (int)0x80020002)
-        T7Log_Write("[Lua] %s could not be opened (0x%08X)", path, (uint32_t)fd);
-
-    return fd;
+    char relative[256];
+    const int count = snprintf(relative, sizeof(relative), "lui/%s", lower);
+    return count > 0 && (size_t)count < sizeof(relative)
+        ? T7LuaFiles::Read(relative, 1024 * 1024, length, false) : nullptr;
 }
 
 static LuiFile g_luiFiles[] =
@@ -2663,37 +2635,15 @@ static const RawFileAsset* LuiFileFor(const char* name)
         {
             file.tried = true;
 
-            const int fd = OpenLuiCopy(file.asset);
-
-            if (fd < 0)
+            size_t used = 0;
+            char* const body = ReadLuiCopy(file.asset, &used);
+            if (!body)
                 return nullptr;
-
-            constexpr int32_t kMax = 1024 * 1024;
-            char* const body = (char*)malloc(kMax);
-            int32_t used = 0;
-
-            while (body != nullptr && used < kMax)
-            {
-                const int64_t read = sceKernelRead(fd, body + used, kMax - used);
-
-                if (read <= 0)
-                    break;
-
-                used += (int32_t)read;
-            }
-
-            sceKernelClose(fd);
-
-            if (body == nullptr || used == 0)
-            {
-                free(body);
-                return nullptr;
-            }
 
             file.data = body;
-            file.length = used;
+            file.length = (int32_t)used;
             g_luiAssets[i].name = file.asset;
-            g_luiAssets[i].length = used;
+            g_luiAssets[i].length = (int32_t)used;
             g_luiAssets[i].padding = 0;
             g_luiAssets[i].buffer = body;
         }
@@ -2763,59 +2713,24 @@ static const RawFileAsset* LuiExtraFor(const char* name)
         snprintf(extra.name, sizeof(extra.name), "%s", lower);
         extra.found = false;
 
-        int fd = OpenLuiCopy(lower);
-        const char* problem = fd < 0 ? "there is no copy in lui" : nullptr;
-
-        if (fd >= 0)
+        size_t used = 0;
+        char* const body = ReadLuiCopy(lower, &used);
+        if (body)
         {
-            constexpr int64_t kMax = 1024 * 1024;
-            const int64_t size = sceKernelLseek(fd, 0, SEEK_END);
-            char* body = nullptr;
-            int64_t used = 0;
-
-            if (size <= 0 || size > kMax || sceKernelLseek(fd, 0, SEEK_SET) != 0)
-                problem = "its copy in lui could not be sized";
-            else if ((body = (char*)malloc((size_t)size + 1)) == nullptr)
-                problem = "there was no memory for its copy in lui";
-
-            while (body != nullptr && used < size)
-            {
-                const int64_t read = sceKernelRead(fd, body + used, (size_t)(size - used));
-
-                if (read <= 0)
-                    break;
-
-                used += read;
-            }
-
-            sceKernelClose(fd);
-
-            if (body != nullptr && used == size)
-            {
-                body[used] = 0;
-                extra.asset.name = extra.name;
-                extra.asset.length = (int32_t)used;
-                extra.asset.padding = 0;
-                extra.asset.buffer = body;
-                extra.found = true;
-            }
-            else
-            {
-                if (body != nullptr)
-                    problem = "its copy in lui could not be read";
-
-                free(body);
-            }
+            extra.asset.name = extra.name;
+            extra.asset.length = (int32_t)used;
+            extra.asset.padding = 0;
+            extra.asset.buffer = body;
+            extra.found = true;
         }
 
         if (extra.found)
             T7Log_Write("[Lua] %s is not in the PS4 game; using the PC copy in lui", lower);
         else
-            T7Log_Write("[Lua] %s is not in the PS4 game and %s", lower, problem ? problem : "its copy in lui is empty");
+            T7Log_Write("[Lua] %s is not in the PS4 game and no complete copy was readable in the Lua roots", lower);
         served = extra.found ? &extra.asset : nullptr;
 
-        if (extra.found || fd < 0)
-            ++g_luiExtraCount;
+        ++g_luiExtraCount;
     }
 
     g_luiExtraLock.store(false, std::memory_order_release);
