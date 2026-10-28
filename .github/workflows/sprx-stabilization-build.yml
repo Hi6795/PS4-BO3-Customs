@@ -1,0 +1,50 @@
+name: SPRX Stabilization Test Build
+
+on:
+  push:
+    branches:
+      - fix/detour-install-safety
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-sprx:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      BO3_SPRX_CONFIGURATION: Debug
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install target compiler and host test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 g++ liblua5.4-0
+      - name: Run existing host tests
+        run: python3 .github/scripts/run_host_checks.py
+      - name: Build and package PS4 GoldHEN Debug SPRX
+        run: python3 .github/scripts/build_sprx.py --package
+      - name: Validate native binary and malformed-container rejection
+        run: python3 .github/scripts/tests/check_native_artifact.py build/openorbis Debug
+      - name: Upload test SPRX and manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bo3-stabilization-debug-${{ github.sha }}
+          path: build/artifact-sprx/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bo3-stabilization-evidence-${{ github.sha }}
+          path: |
+            build/openorbis/build.log
+            build/openorbis/readoelf.txt
+            build/openorbis/target-validation.json
+          if-no-files-found: warn
+          retention-days: 14
