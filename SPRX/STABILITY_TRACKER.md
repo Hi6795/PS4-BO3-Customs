@@ -67,3 +67,9 @@ The existing `SPRX/t7_maps.cpp` already has an on-demand pool extender, `GrowPoo
 - More usable game memory does not automatically fix external-storage stalls: confirm read I/O and asset linking separately.
 
 Recommended test: load the same converted map internally and externally, monitor `[Pools]` growth and exhausted-pool messages, collect a native crash dump and read-path timing if hangs persist.
+
+## Oct 28 gameplay/loading stall code hardening
+
+Commit `251fb971` implements three conservative fixes: (1) a race-free immutable linear lookup of the selected pool-growth entries instead of unsynchronized initialization of a static 128-slot index table on game asset-link workers; (2) check `sceKernelGetdents` entry length before advancing within the directory buffer; (3) reject registry entries when an asset's relative or combined PS4 path would truncate the fixed-size buffer. These changes do not enlarge memory budgets or claim to solve the observed gameplay stall.
+
+Observed older dev.14 PS4 log: gameplay and level-load watchdogs repeatedly sample main offset `0xBADF5A`, streaming workers and database stacks; pool usage does not show an obviously depleted large pool. The logged build predates new dynamic pool safeguards. Need controlled console A/B test, symbolization of `0xBADF5A`, and USB-vs-internal identical map tests; never infer specific engine function from offset alone.
