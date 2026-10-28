@@ -719,6 +719,9 @@ static PoolGrowth g_poolGrowth[] =
 constexpr uint32_t kPoolStepMin  = 8;
 constexpr uint32_t kPoolStepMax  = 4096;
 constexpr uint32_t kPoolExtraMin = 64;
+// Pool metadata is shared by asset-link workers. Only one thread may append
+// entries to the game's free list or update a tracked growth record at a time.
+static std::atomic_flag g_poolGrowthLock = ATOMIC_FLAG_INIT;
 
 static bool EqualsNoCase(const char* a, const char* b)
 {
@@ -1907,11 +1910,21 @@ static void GrowPool(int32_t type)
         return;
 
     AssetPool* const pool = (AssetPool*)(g_base + kAssetPools + sizeof(AssetPool) * (uintptr_t)type);
-    const uint32_t step = growth->limit / 8 < kPoolStepMin ? kPoolStepMin
-                        : (growth->limit / 8 > kPoolStepMax ? kPoolStepMax : growth->limit / 8);
-    const uint32_t most = growth->limit < kPoolExtraMin ? kPoolExtraMin : growth->limit;
+    if (pool->free || pool->single || pool->size != growth->size)
+        return;
 
-    if (pool->free || pool->single || pool->size != growth->size || pool->limit != growth->limit + growth->grown)
+    // Serialization prevents two asset loaders from creating independent
+    // chains and then overwriting each other's pool->free pointer.
+    while (g_poolGrowthLock.test_and_set(std::memory_order_acquire))
+        sceKernelUsleep(50);
+    struct GrowthUnlock
+    {
+        ~GrowthUnlock() { g_poolGrowthLock.clear(std::memory_order_release); }
+    } unlock;
+
+    const uint32_t most = growth->limit < kPoolExtraMin ? kPoolExtraMin : growth->limit;
+    if (pool->free || pool->single || pool->size != growth->size ||
+        (uint64_t)pool->limit != (uint64_t)growth->limit + growth->grown)
         return;
 
     if (growth->grown >= most)
@@ -1925,7 +1938,15 @@ static void GrowPool(int32_t type)
         return;
     }
 
-    const size_t bytes = ((size_t)growth->size * step + 0x3FFF) & ~(size_t)0x3FFF;
+    const uint32_t nominal = growth->limit / 8 < kPoolStepMin ? kPoolStepMin
+                           : (growth->limit / 8 > kPoolStepMax ? kPoolStepMax : growth->limit / 8);
+    const uint32_t remaining = most - growth->grown;
+    const uint32_t step = nominal < remaining ? nominal : remaining;
+    const size_t rawBytes = (size_t)growth->size * step;
+    if (!step || (uint64_t)pool->limit + step > UINT32_MAX ||
+        rawBytes > SIZE_MAX - 0x3FFF)
+        return;
+    const size_t bytes = (rawBytes + 0x3FFF) & ~(size_t)0x3FFF;
     void* block = nullptr;
 
     if (sceKernelMmap(0, bytes, 1 | 2, 0x1000 | 0x2, -1, 0, &block) < 0 || !block)
@@ -1940,7 +1961,8 @@ static void GrowPool(int32_t type)
         *(uintptr_t*)entry = i + 1 < step ? entry + growth->size : 0;
     }
 
-    T7Log_Write("[Pools] the %s pool was full at %u; room for %u more was added", growth->name, pool->limit, step);
+    T7Log_Write("[Pools] %s grew from %u by %u entries (%llu bytes mapped)", growth->name, pool->limit, step,
+                (unsigned long long)bytes);
 
     pool->free = (uintptr_t)block;
     pool->limit += step;
