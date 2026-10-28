@@ -1911,7 +1911,7 @@ static void GrowPool(int32_t type)
 {
     PoolGrowth* const growth = GrowthFor(type);
 
-    if (!growth)
+    if (!growth || growth->capped)
         return;
 
     AssetPool* const pool = (AssetPool*)(g_base + kAssetPools + sizeof(AssetPool) * (uintptr_t)type);
@@ -1952,7 +1952,25 @@ static void GrowPool(int32_t type)
     const uint32_t nominal = growth->limit / 8 < kPoolStepMin ? kPoolStepMin
                            : (growth->limit / 8 > kPoolStepMax ? kPoolStepMax : growth->limit / 8);
     const uint32_t remaining = most - growth->grown;
-    const uint32_t step = nominal < remaining ? nominal : remaining;
+    uint32_t step = nominal < remaining ? nominal : remaining;
+    // Keep one synchronous expansion modest on the asset-link thread.
+    // Large records (notably sounds) must not mmap many MiB in one call.
+    constexpr size_t kPoolMaxBatchBytes = 1024u * 1024u;
+    if (growth->size > kPoolMaxBatchBytes)
+        step = 1;
+    else
+    {
+        const uint32_t byBatch = (uint32_t)(kPoolMaxBatchBytes / growth->size);
+        if (step > byBatch)
+            step = byBatch;
+    }
+    // Spend the remaining shared allocation budget instead of refusing an
+    // entire step that happens to be larger than the remaining allowance.
+    const size_t availableBytes = g_poolGrowthBytes <= kPoolGrowthBudget
+                                ? kPoolGrowthBudget - g_poolGrowthBytes : 0;
+    const size_t byBudget = (availableBytes & ~(size_t)0x3FFF) / growth->size;
+    if (step > byBudget)
+        step = (uint32_t)(byBudget > UINT32_MAX ? UINT32_MAX : byBudget);
     const size_t rawBytes = (size_t)growth->size * step;
     if (!step || (uint64_t)pool->limit + step > UINT32_MAX ||
         rawBytes > SIZE_MAX - 0x3FFF)
@@ -1973,7 +1991,14 @@ static void GrowPool(int32_t type)
 
     if (sceKernelMmap(0, bytes, 1 | 2, 0x1000 | 0x2, -1, 0, &block) < 0 || !block)
     {
-        T7Log_Write("[Pools] the %s pool is full (%u) and no memory could be added", growth->name, pool->limit);
+        // Without this guard the engine retries the failing mmap for every
+        // subsequent link, creating an allocation storm during low memory.
+        if (!growth->capped)
+        {
+            growth->capped = true;
+            T7Log_Write("[Pools] %s allocation failed at limit %u; disabling further plugin growth attempts",
+                        growth->name, pool->limit);
+        }
         return;
     }
 
