@@ -6414,11 +6414,10 @@ void T7Maps_Install(uintptr_t base)
     if (installed || !base)
         return;
 
-    installed = true;
-
     if (!BuildMatches(base))
-        return;
+        return; // Do not permanently disable initialization on a failed probe.
 
+    installed = true;
     g_buildMatched = true;
     g_base = base;
 
