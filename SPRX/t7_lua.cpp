@@ -1912,7 +1912,9 @@ static bool AppendLuaFormat(char* out, size_t size, size_t* used, const char* fo
 
 static void AppendQuoted(char* out, size_t size, size_t* used, const char* text)
 {
-    if (*used + 3 >= size)
+    if (!text)
+        text = "";
+    if (*used >= size || size - *used <= 3)
         return;
 
     out[(*used)++] = '"';
@@ -1941,7 +1943,8 @@ static void ReportUninstall(const char* map, bool removed, const char* message)
     AppendLuaFormat(lua, sizeof(lua), &used, ", %s, ", removed ? "true" : "false");
     AppendQuoted(lua, sizeof(lua), &used, message);
     AppendLuaFormat(lua, sizeof(lua), &used, ") end\n");
-    RunLua(lua, "=bo3customs_uninstalled");
+    if (used < sizeof(lua))
+        RunLua(lua, "=bo3customs_uninstalled");
 }
 
 static void HandleUninstall()
@@ -1984,7 +1987,8 @@ static void ReportModChoice(const char* name, int state, const char* message)
     AppendLuaFormat(lua, sizeof(lua), &used, ", %d, ", state);
     AppendQuoted(lua, sizeof(lua), &used, message);
     AppendLuaFormat(lua, sizeof(lua), &used, ") end\n");
-    RunLua(lua, "=bo3customs_mod_applied");
+    if (used < sizeof(lua))
+        RunLua(lua, "=bo3customs_mod_applied");
 }
 
 static void HandleModChoice()
@@ -2109,7 +2113,8 @@ static void ShowShare()
             AppendLuaFormat(lua, sizeof(lua), &used, ", ");
             AppendQuoted(lua, sizeof(lua), &used, status.speeds);
             AppendLuaFormat(lua, sizeof(lua), &used, ") end\n");
-            shown = RunLua(lua, "=bo3customs_share_show") || shown;
+            if (used < sizeof(lua))
+                shown = RunLua(lua, "=bo3customs_share_show") || shown;
         }
     }
 
@@ -2927,7 +2932,8 @@ static uint64_t Require_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, ui
         AppendQuoted(lua, sizeof(lua), &used, save);
         AppendLuaFormat(lua, sizeof(lua), &used, ")\nrawset(_G, 'BO3CustomsDllMod', %s)\n", dll ? "true" : "false");
 
-        RunLuaOn(L, lua, "=bo3customs_dll_ugc");
+        if (used < sizeof(lua))
+            RunLuaOn(L, lua, "=bo3customs_dll_ugc");
         RunLuaOn(L, k_dllStandInLua, "=bo3customs_dll");
         UiUnlock();
     }
