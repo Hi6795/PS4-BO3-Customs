@@ -37,3 +37,16 @@ Scope: **Zorian1337/PS4-BO3-Customs only**. Do not write to Hi6795 or ItsJokerZz
 2. Record the exact changed files and compare with `main` before merge.
 3. Host tests and target compile must pass; console validation required before claiming gameplay stability.
 4. The user explicitly excluded EBOOT fingerprinting from this work.
+
+## Oct 28 external-map / gameplay incident review (five supplied PS4 logs)
+
+**Observed, not root-cause proven:**
+- External `zm_ds_facility_zw.ff` opened at `/ext0/BO3-Customs/usermaps/...`, 205,864,064 bytes; global redirect table full `1536/1536`. The game then reported no frame/asset progress at 20, 40 and 60 seconds during map loading. A successful file open does not prove complete reads or asset linking.
+- Internal `zm_radiant_hallway.ff` (201,920,896 bytes) and its localized fastfile and xpak companions opened from `/data`, then also showed a 20-second level-loading stall. The engine also requested a `.fd` whose logged route stayed native; whether this optional companion is necessary has not been established.
+- Older logs showed three `Com_Error 2: 0xf7c0fe22` map launches with zero script-runtime errors, but no engine error decoding or exception dump establishes the cause.
+- A gameplay/client crash was reported; available snapshots do not contain a conclusive faulting instruction or exception code. Do not assume external storage causes the gameplay failure.
+- Logs come from multiple October 15–28 debug builds; do not treat observed behavior as proof of a regression in the current stabilization branch.
+
+**Experimental source fix:** `FindPackageFile` now rejects truncated paths/non-regular files, and a missing per-map asset cannot resolve to a global registry entry owned by another package. Focused host regression includes foreign-package collision and same-package fallback. It addresses an invalid routing risk, not a confirmed cause of the observed stall.
+
+**Next diagnostic evidence:** Capture post-open read errors/latency for external files, active DB/asset phase before watchdog snapshot, and the PS4 client's native crash exception PC/LR/stack. Compare identical converted map binaries on internal and external storage without mods.
