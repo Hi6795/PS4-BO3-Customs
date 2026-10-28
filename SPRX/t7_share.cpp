@@ -4256,6 +4256,20 @@ void T7Share_Install(uintptr_t base)
 
 void T7Share_Tick()
 {
+    // The first install is performed during startup, but required network
+    // imports and the server worker may not yet be available. Retry at most
+    // once every five seconds, not on every rendered frame.
+    if (!T7Share::g_ready && T7Share::g_base)
+    {
+        static uint64_t lastRetry = 0;
+        const uint64_t now = sceKernelGetProcessTime();
+        if (!lastRetry || now - lastRetry >= 5000000ULL)
+        {
+            lastRetry = now;
+            T7Share_Install(T7Share::g_base);
+        }
+    }
+
     if (T7Share::g_ready)
     {
         T7Share::Evaluate(true);
