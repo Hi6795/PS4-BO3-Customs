@@ -6214,8 +6214,10 @@ static void InstallHooks(uintptr_t base)
         LowerPlaceholderRank(base);
     }
 
-    if (g_hooksInstalled)
-        return;
+    // Run this only on startup/explicit refresh. Required hooks can already be
+    // ready while optional hooks are still missing; allow a later refresh to
+    // retry the optional installations as well. Detour_Attach is idempotent for
+    // already-installed detours, and signature checks gate optional offsets.
 
     // One-shot signature adjustments should not be repeated if a required
     // hook fails and a later refresh retries the detour installation.
