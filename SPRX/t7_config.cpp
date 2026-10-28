@@ -18,6 +18,10 @@ static std::atomic<bool> g_busy{false};
 static bool              g_migrated = false;
 static char              g_current[kMaxText];
 static char              g_text[kMaxText];
+static bool              g_textOverflow = false;
+constexpr int64_t kMissing = -1;
+constexpr int64_t kReadFailure = -2;
+constexpr int32_t kKernelNotFound = (int32_t)0x80020002;
 
 struct Lock
 {
@@ -35,24 +39,49 @@ struct Lock
 
 static int64_t ReadAll(const char* path, char* out, size_t size)
 {
+    if (!out || size == 0)
+        return kReadFailure;
+
+    out[0] = 0;
     const int fd = sceKernelOpen(path, SCE_KERNEL_O_RDONLY, 0);
 
     if (fd < 0)
-        return -1;
+        return fd == kKernelNotFound ? kMissing : kReadFailure;
 
     size_t used = 0;
+    bool failed = false;
 
     while (used < size - 1)
     {
         const int64_t got = sceKernelRead(fd, out + used, size - 1 - used);
 
-        if (got <= 0)
+        if (got < 0)
+        {
+            failed = true;
+            break;
+        }
+
+        if (got == 0)
             break;
 
         used += (size_t)got;
     }
 
-    sceKernelClose(fd);
+    if (used == size - 1)
+    {
+        char extra;
+        failed = sceKernelRead(fd, &extra, 1) != 0;
+    }
+
+    if (sceKernelClose(fd) < 0)
+        failed = true;
+
+    if (failed)
+    {
+        out[0] = 0;
+        return kReadFailure;
+    }
+
     out[used] = 0;
     return (int64_t)used;
 }
@@ -66,10 +95,19 @@ static bool WriteAll(const char* text, size_t length)
     if (fd < 0)
         return false;
 
-    const int64_t put = length ? sceKernelWrite(fd, text, length) : 0;
-    sceKernelClose(fd);
+    size_t used = 0;
+    while (used < length)
+    {
+        const int64_t put = sceKernelWrite(fd, text + used, length - used);
+        if (put <= 0)
+            break;
+        used += (size_t)put;
+    }
 
-    if (put != (int64_t)length || sceKernelRename(k_temp, k_path) < 0)
+    const bool synced = used == length && sceKernelFsync(fd) >= 0;
+    const bool closed = sceKernelClose(fd) >= 0;
+
+    if (!synced || !closed || sceKernelRename(k_temp, k_path) < 0)
     {
         sceKernelUnlink(k_temp);
         return false;
@@ -80,8 +118,11 @@ static bool WriteAll(const char* text, size_t length)
 
 static void Put(size_t* used, const char* data, size_t length)
 {
-    if (*used + length >= sizeof(g_text))
+    if (length >= sizeof(g_text) - *used)
+    {
+        g_textOverflow = true;
         return;
+    }
 
     memcpy(g_text + *used, data, length);
     *used += length;
@@ -105,28 +146,39 @@ static void PutBlock(size_t* used, const char* header, const char* lines)
         Put(used, "\n", 1);
 }
 
-static void Migrate()
+static bool Migrate()
 {
     if (g_migrated)
-        return;
-
-    g_migrated = true;
+        return true;
 
     SceKernelStat st;
 
-    if (sceKernelStat(k_path, &st) == 0)
-        return;
+    const int exists = sceKernelStat(k_path, &st);
+    if (exists == 0)
+    {
+        g_migrated = true;
+        return true;
+    }
+    if (exists != kKernelNotFound)
+        return false;
 
     static char binds[kMaxText / 2];
     static char graphics[4096];
     const int64_t bindsLength = ReadAll(k_oldBinds, binds, sizeof(binds));
     const int64_t graphicsLength = ReadAll(k_oldGraphics, graphics, sizeof(graphics));
 
-    if (bindsLength < 0 && graphicsLength < 0)
-        return;
+    if (bindsLength == kReadFailure || graphicsLength == kReadFailure)
+        return false;
+
+    if (bindsLength == kMissing && graphicsLength == kMissing)
+    {
+        g_migrated = true;
+        return true;
+    }
 
     size_t used = 0;
     g_text[0] = 0;
+    g_textOverflow = false;
 
     if (bindsLength > 0)
         PutBlock(&used, "// keyboard and mouse", binds);
@@ -157,11 +209,13 @@ static void Migrate()
         }
     }
 
-    if (!WriteAll(g_text, used))
+    if (g_textOverflow || !WriteAll(g_text, used))
     {
         T7Log_Write("[Config] config.cfg could not be written; kbm.cfg and graphics.cfg stay");
-        return;
+        return false;
     }
+
+    g_migrated = true;
 
     if (bindsLength >= 0)
         sceKernelUnlink(k_oldBinds);
@@ -170,6 +224,7 @@ static void Migrate()
         sceKernelUnlink(k_oldGraphics);
 
     T7Log_Write("[Config] kbm.cfg and graphics.cfg are now config.cfg");
+    return true;
 }
 }
 
@@ -178,8 +233,9 @@ bool T7Config_Read(char* out, size_t size)
     using namespace T7Config;
 
     Lock lock;
-    Migrate();
-    return ReadAll(k_path, out, size) >= 0;
+    if (out && size)
+        out[0] = 0;
+    return Migrate() && ReadAll(k_path, out, size) >= 0;
 }
 
 bool T7Config_Save(const char* section, bool (*owns)(const char* line), const char* lines)
@@ -187,17 +243,27 @@ bool T7Config_Save(const char* section, bool (*owns)(const char* line), const ch
     using namespace T7Config;
 
     Lock lock;
-    Migrate();
+    if (!section || !owns || !lines || !Migrate())
+        return false;
 
-    if (ReadAll(k_path, g_current, sizeof(g_current)) < 0)
+    const int64_t got = ReadAll(k_path, g_current, sizeof(g_current));
+    if (got == kReadFailure)
+    {
+        T7Log_Write("[Config] config.cfg could not be read completely; keeping the original");
+        return false;
+    }
+    if (got == kMissing)
         g_current[0] = 0;
 
     char header[96];
-    snprintf(header, sizeof(header), "// %s", section);
+    const int headerLength = snprintf(header, sizeof(header), "// %s", section);
+    if (headerLength < 0 || (size_t)headerLength >= sizeof(header))
+        return false;
 
     size_t used = 0;
     bool placed = false;
     g_text[0] = 0;
+    g_textOverflow = false;
 
     for (char* line = g_current; *line;)
     {
@@ -232,5 +298,10 @@ bool T7Config_Save(const char* section, bool (*owns)(const char* line), const ch
     if (!placed)
         PutBlock(&used, header, lines);
 
+    if (g_textOverflow)
+    {
+        T7Log_Write("[Config] updated config.cfg is too large; keeping the original");
+        return false;
+    }
     return WriteAll(g_text, used);
 }

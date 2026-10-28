@@ -367,7 +367,8 @@ struct ListReader
 
 static void BeginListWrite()
 {
-    g_listWriting.store(true);
+    while (g_listWriting.exchange(true))
+        sceKernelUsleep(100);
 
     while (g_listReaders.load() != 0)
         sceKernelUsleep(100);
@@ -375,7 +376,7 @@ static void BeginListWrite()
 
 static void EndListWrite()
 {
-    g_listWriting.store(false);
+    g_listWriting.store(false, std::memory_order_release);
 }
 
 static Detour g_openDetour{};
@@ -5850,7 +5851,8 @@ static void ScanMods(const char* data)
 
 static bool WriteChosenMods(const char (*names)[kNameMax], int count)
 {
-    const int fd = sceKernelOpen(k_chosenModFile, SCE_KERNEL_O_WRONLY | SCE_KERNEL_O_CREAT | SCE_KERNEL_O_TRUNC, 0777);
+    const char* const temporary = "/data/BO3-Customs/active_mod.txt.tmp";
+    const int fd = sceKernelOpen(temporary, SCE_KERNEL_O_WRONLY | SCE_KERNEL_O_CREAT | SCE_KERNEL_O_TRUNC, 0777);
 
     if (fd < 0)
         return false;
@@ -5861,11 +5863,25 @@ static bool WriteChosenMods(const char (*names)[kNameMax], int count)
     {
         char line[kNameMax + 2];
         const int n = snprintf(line, sizeof(line), "%s\n", names[i]);
-        written = n > 0 && sceKernelWrite(fd, line, (size_t)n) == (int64_t)n;
+        written = n > 0 && (size_t)n < sizeof(line);
+        for (size_t at = 0; written && at < (size_t)n;)
+        {
+            const int64_t put = sceKernelWrite(fd, line + at, (size_t)n - at);
+            if (put <= 0)
+                written = false;
+            else
+                at += (size_t)put;
+        }
     }
 
-    sceKernelClose(fd);
-    return written;
+    const bool synced = written && sceKernelFsync(fd) >= 0;
+    const bool closed = sceKernelClose(fd) >= 0;
+    if (!synced || !closed || sceKernelRename(temporary, k_chosenModFile) < 0)
+    {
+        sceKernelUnlink(temporary);
+        return false;
+    }
+    return true;
 }
 
 static void AppendModFiles(char* out, size_t size, size_t* at)
@@ -5907,6 +5923,7 @@ static char g_modsLua[256 * 1024];
 
 static void BuildModsLua()
 {
+    ListReader reading;
     char* const out = g_modsLua;
     const size_t size = sizeof(g_modsLua);
     size_t used = 0;

@@ -56,6 +56,8 @@ constexpr int32_t   kAddressLoopback    = 2;
 constexpr int32_t   kAddressIp          = 4;
 
 constexpr int      kMaxEntries          = 768;
+constexpr uint64_t kMaxSharedFileBytes  = 64ULL * 1024 * 1024 * 1024;
+constexpr uint64_t kMaxSharedTotalBytes = 256ULL * 1024 * 1024 * 1024;
 constexpr size_t   kRelMax              = 160;
 constexpr size_t   kPathMax             = kT7SharePath + kT7ShareName + kRelMax + 32;
 constexpr size_t   kChunk               = 256 * 1024;
@@ -2986,17 +2988,70 @@ static bool Fetch(Link& link, int id, const Entry& entry, const char* target, ch
         }
     }
 
-    sceKernelFsync(fd);
-    sceKernelClose(fd);
+    const bool synced = sceKernelFsync(fd) >= 0;
+    const bool closed = sceKernelClose(fd) >= 0;
+
+    if (!problem && (!synced || !closed))
+        problem = "this console could not finish saving the file";
 
     if (problem)
         return Fail("%s", g_stop.load() ? "the download was cancelled" : problem);
 
-    sceKernelUnlink(target);
-
     if (sceKernelRename(part, target) < 0)
         return Fail("this console could not save %s", entry.rel);
 
+    return true;
+}
+
+static bool ReadDecimal(const char*& at, uint64_t limit, uint64_t* value)
+{
+    if (*at < '0' || *at > '9')
+        return false;
+
+    uint64_t parsed = 0;
+    do
+    {
+        const uint64_t digit = (uint64_t)(*at - '0');
+        if (parsed > limit / 10 || (parsed == limit / 10 && digit > limit % 10))
+            return false;
+        parsed = parsed * 10 + digit;
+        ++at;
+    } while (*at >= '0' && *at <= '9');
+
+    if (*at != ' ')
+        return false;
+    while (*at == ' ')
+        ++at;
+
+    *value = parsed;
+    return true;
+}
+
+static bool ParseFileRecord(const char* at, int expected, int modCount, Entry* entry)
+{
+    uint64_t id, kind = 0, size;
+    if (!ReadDecimal(at, kMaxEntries - 1, &id) || id != (uint64_t)expected)
+        return false;
+
+    const bool map = *at == '-';
+    if (map)
+    {
+        if (strncmp(at, "-1 ", 3) != 0)
+            return false;
+        at += 3;
+        while (*at == ' ')
+            ++at;
+    }
+    else if (!ReadDecimal(at, kT7ShareMods - 1, &kind) || kind >= (uint64_t)modCount)
+        return false;
+
+    if (!ReadDecimal(at, kMaxSharedFileBytes, &size) || !SafeRel(at))
+        return false;
+
+    entry->size = size;
+    entry->kind = map ? -1 : (int32_t)kind;
+    entry->wanted = false;
+    snprintf(entry->rel, sizeof(entry->rel), "%s", at);
     return true;
 }
 
@@ -3028,6 +3083,7 @@ static bool ReadList(Link& link, Entry* entries, int* count, char* hostMap, bool
     if (strcmp(line, "BO3C 1 OK") != 0)
         return Fail("the host is not sharing its files right now");
 
+    uint64_t total = 0;
     while (NextLine(link, line, sizeof(line)))
     {
         if (strcmp(line, "end") == 0)
@@ -3054,22 +3110,13 @@ static bool ReadList(Link& link, Entry* entries, int* count, char* hostMap, bool
         }
         else if (strncmp(line, "file ", 5) == 0)
         {
-            char* at = line + 5;
-            const long id = strtol(at, &at, 10);
-            const long kind = strtol(at, &at, 10);
-            const uint64_t size = strtoull(at, &at, 10);
-
-            while (*at == ' ')
-                ++at;
-
-            if (id != *count || *count >= kMaxEntries || kind < -1 || kind >= *modCount || !SafeRel(at))
+            if (*count >= kMaxEntries || !ParseFileRecord(line + 5, *count, *modCount, &entries[*count]))
                 return Fail("the host sent a file list this console cannot use");
 
-            Entry& entry = entries[(*count)++];
-            entry.size = size;
-            entry.kind = (int32_t)kind;
-            entry.wanted = false;
-            snprintf(entry.rel, sizeof(entry.rel), "%s", at);
+            const Entry& entry = entries[(*count)++];
+            if (entry.size > kMaxSharedTotalBytes - total)
+                return Fail("the host's file list is too large");
+            total += entry.size;
         }
     }
 
