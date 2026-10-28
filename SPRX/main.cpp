@@ -97,7 +97,7 @@ static void* start_thread(void*)
 
     T7Log_Install(base);
 #ifdef _DEBUG
-    T7Log_Write("[Build] BO3-Customs-v4.00.1-dev.20-DEBUG");
+    T7Log_Write("[Build] BO3-Customs-v4.00.1-dev.21-DEBUG");
     if (!is_ps5)
     {
         for (size_t i = 0; i < kDriveCount; ++i)
