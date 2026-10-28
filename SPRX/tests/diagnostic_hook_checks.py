@@ -33,6 +33,7 @@ static uint64_t Native(uint64_t a,uint64_t b,uint64_t c,uint64_t d,uint64_t e,ui
 }
 static void* g_scriptErrorOriginal = (void*)Native;
 static uint32_t g_scriptErrors = 0;
+static std::atomic<bool> g_vmChildExhaustionSeen{false};
 static T7Diagnostics::ScriptErrorBudget g_scriptBudget;
 static int T7Maps_ScriptOwner(const char*) { return 1; }
 void T7Maps_TraceDiagnostics(const char*) {}

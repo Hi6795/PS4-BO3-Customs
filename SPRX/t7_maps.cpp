@@ -719,6 +719,13 @@ static PoolGrowth g_poolGrowth[] =
 constexpr uint32_t kPoolStepMin  = 8;
 constexpr uint32_t kPoolStepMax  = 4096;
 constexpr uint32_t kPoolExtraMin = 64;
+// Conservative total mapped-memory ceiling for extra plugin-owned pool blocks.
+// This does not reclaim or change the game's native memory reservations.
+constexpr size_t kPoolGrowthBudget = 64u * 1024u * 1024u;
+static size_t g_poolGrowthBytes = 0;
+// Pool metadata is shared by asset-link workers. Only one thread may append
+// entries to the game's free list or update a tracked growth record at a time.
+static std::atomic_flag g_poolGrowthLock = ATOMIC_FLAG_INIT;
 
 static bool EqualsNoCase(const char* a, const char* b)
 {
@@ -793,6 +800,16 @@ static int ListFolder(const char* folder, bool folders, char names[][kListedName
     if (fd < 0)
         return 0;
 
+    // ScanAll can be invoked by refresh paths while another scan is active.
+    // Serialize access to the shared 64 KiB getdents buffer.
+    static std::atomic_flag directoryBufferLock = ATOMIC_FLAG_INIT;
+    while (directoryBufferLock.test_and_set(std::memory_order_acquire))
+        sceKernelUsleep(50);
+    struct UnlockDirectoryBuffer
+    {
+        std::atomic_flag& flag;
+        ~UnlockDirectoryBuffer() { flag.clear(std::memory_order_release); }
+    } unlock{directoryBufferLock};
     static char buffer[0x10000];
     int count = 0;
 
@@ -807,19 +824,32 @@ static int ListFolder(const char* folder, bool folders, char names[][kListedName
         {
             const SceKernelDirent* const entry = (const SceKernelDirent*)(buffer + at);
 
-            if (entry->d_reclen == 0)
+            // A damaged or truncated directory record must not advance past
+            // the getdents buffer and cause an out-of-bounds name read.
+            if (entry->d_reclen < 8 || entry->d_reclen > n - at)
                 break;
 
+            const size_t header = (size_t)((const char*)entry->d_name - (const char*)entry);
+            if (header >= entry->d_reclen)
+                break;
+            const size_t available = entry->d_reclen - header;
+            const char* const terminator = (const char*)memchr(entry->d_name, 0, available);
+            if (!terminator)
+                break;
+            const size_t nameLength = (size_t)(terminator - entry->d_name);
             at += entry->d_reclen;
 
-            if (entry->d_fileno == 0 || entry->d_name[0] == '.')
+            if (entry->d_fileno == 0 || !nameLength || entry->d_name[0] == '.')
                 continue;
 
-            if ((entry->d_type == SCE_KERNEL_DT_DIR) != folders || strlen(entry->d_name) >= kListedNameMax)
+            if ((entry->d_type == SCE_KERNEL_DT_DIR) != folders || nameLength >= kListedNameMax)
                 continue;
 
             if (count < capacity)
-                snprintf(names[count++], kListedNameMax, "%s", entry->d_name);
+            {
+                memcpy(names[count], entry->d_name, nameLength);
+                names[count++][nameLength] = 0;
+            }
         }
     }
 
@@ -840,9 +870,18 @@ static void AddFile(const char* rel, const char* folder, int package)
     if (g_fileCount >= kMaxFiles)
         return;
 
+    // The registry must never contain silently truncated paths: loading a
+    // different or nonexistent fastfile can leave the DB loader waiting.
+    if (strlen(rel) >= sizeof(g_files[0].rel))
+        return;
+    char path[sizeof(g_files[0].path)];
+    const int length = snprintf(path, sizeof(path), "%s/%s", folder, rel);
+    if (length < 0 || (size_t)length >= sizeof(path))
+        return;
+
     File& file = g_files[g_fileCount++];
     snprintf(file.rel, sizeof(file.rel), "%s", rel);
-    snprintf(file.path, sizeof(file.path), "%s/%s", folder, rel);
+    memcpy(file.path, path, (size_t)length + 1);
     file.package = package;
 }
 
@@ -907,16 +946,16 @@ static int AddPackage(const char* name, bool map, const char* folder, const char
 static bool FindPackageFile(const Package& package, const char* rel, char* out, size_t size)
 {
     SceKernelStat st;
-    snprintf(out, size, "%s/%s", package.folder, rel);
-
-    if (sceKernelStat(out, &st) == 0)
+    // Do not stat a truncated path: it could resolve a different asset.
+    const int first = snprintf(out, size, "%s/%s", package.folder, rel);
+    if (first > 0 && (size_t)first < size && sceKernelStat(out, &st) == 0 && ((st.st_mode & 0170000) == 0100000))
         return true;
 
     if (!package.alternate[0])
         return false;
 
-    snprintf(out, size, "%s/%s", package.alternate, rel);
-    return sceKernelStat(out, &st) == 0;
+    const int second = snprintf(out, size, "%s/%s", package.alternate, rel);
+    return second > 0 && (size_t)second < size && sceKernelStat(out, &st) == 0 && ((st.st_mode & 0170000) == 0100000);
 }
 
 static void ScanUsermaps(const char* data)
@@ -1437,7 +1476,9 @@ static uint64_t FileOpen_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, u
                     {
                         if (strcmp(g_files[i].rel, rel) == 0)
                         {
-                            if (!nativeBootstrap)
+                            // A missing map-specific asset must never silently
+                            // load a different package's file with the same name.
+                            if (!nativeBootstrap && (mapPackage < 0 || g_files[i].package == mapPackage))
                                 found = i;
 #ifdef _DEBUG
                             else
@@ -1877,39 +1918,45 @@ static void RenameStackAsset(uint64_t asset)
 
 static PoolGrowth* GrowthFor(int32_t type)
 {
-    static int16_t index[128];
-    static bool built = false;
-
-    if (!built)
+    // Linking can run concurrently on database workers. Avoid publishing a
+    // mutable lookup table before it is completely initialized.
+    for (PoolGrowth& growth : g_poolGrowth)
     {
-        for (int16_t& slot : index)
-            slot = -1;
-
-        for (size_t i = 0; i < sizeof(g_poolGrowth) / sizeof(g_poolGrowth[0]); ++i)
-        {
-            if (g_poolGrowth[i].type >= 0 && g_poolGrowth[i].type < 128)
-                index[g_poolGrowth[i].type] = (int16_t)i;
-        }
-
-        built = true;
+        if (growth.type == type)
+            return &growth;
     }
-
-    return type >= 0 && type < 128 && index[type] >= 0 ? &g_poolGrowth[index[type]] : nullptr;
+    return nullptr;
 }
 
 static void GrowPool(int32_t type)
 {
     PoolGrowth* const growth = GrowthFor(type);
 
-    if (!growth)
+    if (!growth || growth->capped)
         return;
 
     AssetPool* const pool = (AssetPool*)(g_base + kAssetPools + sizeof(AssetPool) * (uintptr_t)type);
-    const uint32_t step = growth->limit / 8 < kPoolStepMin ? kPoolStepMin
-                        : (growth->limit / 8 > kPoolStepMax ? kPoolStepMax : growth->limit / 8);
-    const uint32_t most = growth->limit < kPoolExtraMin ? kPoolExtraMin : growth->limit;
+    if (pool->free || pool->single || pool->size != growth->size)
+        return;
 
-    if (pool->free || pool->single || pool->size != growth->size || pool->limit != growth->limit + growth->grown)
+    // Serialization prevents two asset loaders from creating independent
+    // chains and then overwriting each other's pool->free pointer.
+    while (g_poolGrowthLock.test_and_set(std::memory_order_acquire))
+        sceKernelUsleep(50);
+    struct GrowthUnlock
+    {
+        ~GrowthUnlock() { g_poolGrowthLock.clear(std::memory_order_release); }
+    } unlock;
+
+    // Allow selected low-per-entry-cost asset pools to reach triple their
+    // initial capacity (two extra originals), without enlarging heavy sound,
+    // model, animation or material pools globally.
+    const bool extraRoom = type == kScriptParseTree || type == kRawFileAsset || type == 22 || type == 69;
+    const uint32_t multiplier = extraRoom ? 2u : 1u;
+    const uint32_t ordinary = growth->limit < kPoolExtraMin ? kPoolExtraMin : growth->limit;
+    const uint32_t most = ordinary > UINT32_MAX / multiplier ? UINT32_MAX : ordinary * multiplier;
+    if (pool->free || pool->single || pool->size != growth->size ||
+        (uint64_t)pool->limit != (uint64_t)growth->limit + growth->grown)
         return;
 
     if (growth->grown >= most)
@@ -1923,12 +1970,56 @@ static void GrowPool(int32_t type)
         return;
     }
 
-    const size_t bytes = ((size_t)growth->size * step + 0x3FFF) & ~(size_t)0x3FFF;
+    const uint32_t nominal = growth->limit / 8 < kPoolStepMin ? kPoolStepMin
+                           : (growth->limit / 8 > kPoolStepMax ? kPoolStepMax : growth->limit / 8);
+    const uint32_t remaining = most - growth->grown;
+    uint32_t step = nominal < remaining ? nominal : remaining;
+    // Keep one synchronous expansion modest on the asset-link thread.
+    // Large records (notably sounds) must not mmap many MiB in one call.
+    constexpr size_t kPoolMaxBatchBytes = 1024u * 1024u;
+    if (growth->size > kPoolMaxBatchBytes)
+        step = 1;
+    else
+    {
+        const uint32_t byBatch = (uint32_t)(kPoolMaxBatchBytes / growth->size);
+        if (step > byBatch)
+            step = byBatch;
+    }
+    // Spend the remaining shared allocation budget instead of refusing an
+    // entire step that happens to be larger than the remaining allowance.
+    const size_t availableBytes = g_poolGrowthBytes <= kPoolGrowthBudget
+                                ? kPoolGrowthBudget - g_poolGrowthBytes : 0;
+    const size_t byBudget = (availableBytes & ~(size_t)0x3FFF) / growth->size;
+    if (step > byBudget)
+        step = (uint32_t)(byBudget > UINT32_MAX ? UINT32_MAX : byBudget);
+    const size_t rawBytes = (size_t)growth->size * step;
+    if (!step || (uint64_t)pool->limit + step > UINT32_MAX ||
+        rawBytes > SIZE_MAX - 0x3FFF)
+        return;
+    const size_t bytes = (rawBytes + 0x3FFF) & ~(size_t)0x3FFF;
+    if (g_poolGrowthBytes > kPoolGrowthBudget || bytes > kPoolGrowthBudget - g_poolGrowthBytes)
+    {
+        if (!growth->capped)
+        {
+            growth->capped = true;
+            T7Log_Write("[Pools] %s cannot grow: plugin asset-pool memory budget reached (%llu / %llu bytes)",
+                        growth->name, (unsigned long long)g_poolGrowthBytes,
+                        (unsigned long long)kPoolGrowthBudget);
+        }
+        return;
+    }
     void* block = nullptr;
 
     if (sceKernelMmap(0, bytes, 1 | 2, 0x1000 | 0x2, -1, 0, &block) < 0 || !block)
     {
-        T7Log_Write("[Pools] the %s pool is full (%u) and no memory could be added", growth->name, pool->limit);
+        // Without this guard the engine retries the failing mmap for every
+        // subsequent link, creating an allocation storm during low memory.
+        if (!growth->capped)
+        {
+            growth->capped = true;
+            T7Log_Write("[Pools] %s allocation failed at limit %u; disabling further plugin growth attempts",
+                        growth->name, pool->limit);
+        }
         return;
     }
 
@@ -1938,11 +2029,13 @@ static void GrowPool(int32_t type)
         *(uintptr_t*)entry = i + 1 < step ? entry + growth->size : 0;
     }
 
-    T7Log_Write("[Pools] the %s pool was full at %u; room for %u more was added", growth->name, pool->limit, step);
+    T7Log_Write("[Pools] %s grew from %u by %u entries (%llu bytes mapped)", growth->name, pool->limit, step,
+                (unsigned long long)bytes);
 
     pool->free = (uintptr_t)block;
     pool->limit += step;
     growth->grown += step;
+    g_poolGrowthBytes += bytes;
 }
 
 static uint64_t LinkXAsset_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
@@ -3384,7 +3477,16 @@ static uint64_t TexturesLoaded_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t
         LogStreamGate(now - start, logs % 6 == 1);
     }
 
-    if (now - start < kTextureWaitUs)
+    if (now < start || now - start < kTextureWaitUs)
+        return result;
+
+    // Never declare a custom level ready while the stream subsystem still
+    // reports pending work. It can strand the renderer on incomplete lighting
+    // and texture resources and turn a loading delay into a GPU-frame stall.
+    const int32_t pending = *(const volatile int32_t*)(g_base + kStreamPending);
+    const uint8_t streamStarted = *(const volatile uint8_t*)(g_base + kStreamStarted);
+    const uint8_t streamDone = *(const volatile uint8_t*)(g_base + kStreamDone);
+    if (pending != 0 || !streamStarted || !streamDone)
         return result;
 
     *value = 1;
@@ -4606,8 +4708,12 @@ static uint64_t BlockJob_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, u
         const uint32_t stored = *(uint32_t*)(slot + 0x40030);
         const uint64_t ring = *(uint64_t*)(g_base + kReadRing);
 
-        const bool outside = hashed && (data < ring || data + hashed > ring + 0xA00000);
-        const bool odd = hashed > stored + 3 || unpacked > 0x40000;
+        // Subtraction-based range validation avoids wrapping either end
+        // of the ring or the requested length on malformed stream blocks.
+        const bool outside = hashed && (!ring || data < ring ||
+                                      data - ring >= 0xA00000 ||
+                                      hashed > 0xA00000 - (data - ring));
+        const bool odd = (hashed > stored && hashed - stored > 3) || unpacked > 0x40000;
 
         if (outside || odd)
         {
@@ -6214,13 +6320,20 @@ static void InstallHooks(uintptr_t base)
         LowerPlaceholderRank(base);
     }
 
-    if (g_hooksInstalled)
-        return;
+    // Run this only on startup/explicit refresh. Required hooks can already be
+    // ready while optional hooks are still missing; allow a later refresh to
+    // retry the optional installations as well. Detour_Attach is idempotent for
+    // already-installed detours, and signature checks gate optional offsets.
 
-    g_hooksInstalled = true;
-
-    for (const SignaturePatch& patch : k_signaturePatches)
-        RemoveSignaturePenalty(base, patch);
+    // One-shot signature adjustments should not be repeated if a required
+    // hook fails and a later refresh retries the detour installation.
+    static bool signaturePatchesChecked = false;
+    if (!signaturePatchesChecked)
+    {
+        for (const SignaturePatch& patch : k_signaturePatches)
+            RemoveSignaturePenalty(base, patch);
+        signaturePatchesChecked = true;
+    }
 
     Detour_Attach(&g_openDetour, (uint64_t)(base + kFileOpen), (void*)FileOpen_h, &g_openOriginal);
     Detour_Attach(&g_existsDetour, (uint64_t)(base + kMapExists), (void*)MapExists_h, &g_existsOriginal);
@@ -6375,6 +6488,15 @@ static void InstallHooks(uintptr_t base)
         Detour_Attach(&g_dispatchDetour, (uint64_t)(base + kDispatch), (void*)Dispatch_h, &g_dispatchOriginal);
     }
 #endif
+
+    // Mark the essential map hooks ready only when they really have originals.
+    // A later refresh can retry missing hooks; Detour_Attach is idempotent for
+    // already-installed Detour objects.
+    g_hooksInstalled = g_openOriginal && g_existsOriginal && g_validOriginal && g_loadOriginal;
+    if (!g_hooksInstalled)
+        T7Log_Write("[Maps] required hook unavailable (open=%d exists=%d valid=%d load=%d); will retry on refresh",
+                    g_openOriginal != nullptr, g_existsOriginal != nullptr,
+                    g_validOriginal != nullptr, g_loadOriginal != nullptr);
 }
 }
 
@@ -6398,11 +6520,10 @@ void T7Maps_Install(uintptr_t base)
     if (installed || !base)
         return;
 
-    installed = true;
-
     if (!BuildMatches(base))
-        return;
+        return; // Do not permanently disable initialization on a failed probe.
 
+    installed = true;
     g_buildMatched = true;
     g_base = base;
 

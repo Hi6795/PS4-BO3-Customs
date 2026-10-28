@@ -1,0 +1,95 @@
+# BO3-Customs stability work tracker
+
+Scope: **Zorian1337/PS4-BO3-Customs only**. Do not write to Hi6795 or ItsJokerZz repositories. Base for this branch: merged PR #18, commit `8225c7bf7d71a02b099b64cec5b8452dca5eec75`.
+
+## Implemented on this feature branch (not yet console-verified)
+
+| ID | Area | Change | Verification |
+| --- | --- | --- | --- |
+| H01 | Detour attach | Record targets only after successful installation; failed attempts remain retryable; stop safely at 96 entries | Source change; host/PS4 tests pending |
+| H02 | Detour memory | Check `sceKernelMprotect` before writing; restore target bytes on a failed write when possible | Source change; fault-injection test pending |
+| H03 | Detour concurrency | Serialize registration and detach operations with atomic lock | Source change; multi-thread testing pending |
+| H04 | Detour detach | Do not remove mapping when original bytes cannot be restored | Source change; thread-quiescence still **unresolved** |
+| M01 | Map hooks | Mark required hooks initialized only when all original function pointers exist; retry on later refresh | Source change; host/console tests pending |
+| M02 | Map signature patches | Avoid repeating one-shot signature modifications during hook retries | Source change; tests pending |
+
+| S03 | Sharing init | Retry unavailable imports and server-thread start without duplicate asks worker or repeated peer reset; five-second retries from frame tick | Implemented; console test pending |
+
+| M03 | Optional hooks | Attempt optional signature-gated map hook installation on later map refresh, even when required hooks already installed | Implemented; native and console tests pending |
+| M04 | Map init | Failed `BuildMatches` probe no longer permanently marks initialization done | Implemented; tests pending |
+| H08 | Detour failure | An unrecoverable partial target patch now retains its owning detour record and mapping so duplicate attachment is blocked | Implemented; fault-injection tests pending |
+
+## Follow-up risks (no claim of resolution)
+
+| ID | Area | Investigation/action |
+| --- | --- | --- |
+| H05 | Detour detach | A fixed 20 ms grace interval does **not** establish that trampoline users have exited. Design explicit quiescence or defer freeing until process shutdown. |
+| H06 | Detour failed restore | If a partially written patch cannot be restored, currently retaining the trampoline protects from immediate dangling jump targets but leaves recovery unresolved. |
+| H07 | Native patch integrity | Add target-byte validation, fault injection and instruction-cache coherency checks appropriate to PS4. |
+| S01 | Sharing init | Retry state implemented; verify on-console recovery after transient import/thread failures and test worker concurrency. |
+| S02 | 8-client map sharing | Measure direct 4-connection and UDP 4-peer limits with up to eight lobby members before changing capacities. |
+| L01 | Mod lifecycle | Exercise mode transitions, nested frontend reloads and asset ownership under existing regression suite and on console. |
+| N01 | Multiplayer | Add bounded admission/spawn/snapshot diagnostics for 5–8 players without assuming `kMemberSlots=18` means eight-player game support. |
+| T01 | Regression | Run existing host checks plus additional hook failure/retry tests, then PS4 tests. |
+
+## Rules for merging
+1. Keep current `main` and user-authored fixes preserved; no force pushes, resets or upstream writes.
+2. Record the exact changed files and compare with `main` before merge.
+3. Host tests and target compile must pass; console validation required before claiming gameplay stability.
+4. The user explicitly excluded EBOOT fingerprinting from this work.
+
+## Oct 28 external-map / gameplay incident review (five supplied PS4 logs)
+
+**Observed, not root-cause proven:**
+- External `zm_ds_facility_zw.ff` opened at `/ext0/BO3-Customs/usermaps/...`, 205,864,064 bytes; global redirect table full `1536/1536`. The game then reported no frame/asset progress at 20, 40 and 60 seconds during map loading. A successful file open does not prove complete reads or asset linking.
+- Internal `zm_radiant_hallway.ff` (201,920,896 bytes) and its localized fastfile and xpak companions opened from `/data`, then also showed a 20-second level-loading stall. The engine also requested a `.fd` whose logged route stayed native; whether this optional companion is necessary has not been established.
+- Older logs showed three `Com_Error 2: 0xf7c0fe22` map launches with zero script-runtime errors, but no engine error decoding or exception dump establishes the cause.
+- A gameplay/client crash was reported; available snapshots do not contain a conclusive faulting instruction or exception code. Do not assume external storage causes the gameplay failure.
+- Logs come from multiple October 15–28 debug builds; do not treat observed behavior as proof of a regression in the current stabilization branch.
+
+**Experimental source fix:** `FindPackageFile` now rejects truncated paths/non-regular files, and a missing per-map asset cannot resolve to a global registry entry owned by another package. Focused host regression includes foreign-package collision and same-package fallback. It addresses an invalid routing risk, not a confirmed cause of the observed stall.
+
+**Next diagnostic evidence:** Capture post-open read errors/latency for external files, active DB/asset phase before watchdog snapshot, and the PS4 client's native crash exception PC/LR/stack. Compare identical converted map binaries on internal and external storage without mods.
+
+## Oct 28 asset pool and available-memory investigation
+
+The existing `SPRX/t7_maps.cpp` already has an on-demand pool extender, `GrowPool`, for selected asset types. It checks an expected pool element size/base limit and extends a drained free list through PS4 `sceKernelMmap`; its intended per-type cap is approximately one additional original pool's capacity (minimum 64 elements). This is **asset-count capacity**, not a reservation of additional game RAM. It does not reclaim or resize the engine's other memory arenas.
+
+**Implemented, pending console stress test:**
+- Serialize plugin-side free-list growth so two asset-link workers do not independently install new free-list chains.
+- Clamp each growth batch to the remaining per-type allowed capacity, preventing limit overshoot when the cap is not a multiple of the batch size.
+- Check limit arithmetic and mmap allocation-size arithmetic; report the size of a successful allocation in bytes for log-based diagnosis.
+
+**Not established / not implemented:**
+- Discord discussion's claim that 5 GB is reserved and half unused is not independently confirmed from this BO3 EBOOT or console memory telemetry. Do not reclaim/reclassify unknown game or system memory regions.
+- No global pool-size increase, expanded RAM allowance, or patch to proprietary OS memory budgets was made.
+- The native game's own free-list access and possible background allocators need hardware stress testing; serializing the plugin's growth calls does not prove the engine's allocator synchronization.
+- More usable game memory does not automatically fix external-storage stalls: confirm read I/O and asset linking separately.
+
+Recommended test: load the same converted map internally and externally, monitor `[Pools]` growth and exhausted-pool messages, collect a native crash dump and read-path timing if hangs persist.
+
+## Oct 28 gameplay/loading stall code hardening
+
+Commit `251fb971` implements three conservative fixes: (1) a race-free immutable linear lookup of the selected pool-growth entries instead of unsynchronized initialization of a static 128-slot index table on game asset-link workers; (2) check `sceKernelGetdents` entry length before advancing within the directory buffer; (3) reject registry entries when an asset's relative or combined PS4 path would truncate the fixed-size buffer. These changes do not enlarge memory budgets or claim to solve the observed gameplay stall.
+
+Observed older dev.14 PS4 log: gameplay and level-load watchdogs repeatedly sample main offset `0xBADF5A`, streaming workers and database stacks; pool usage does not show an obviously depleted large pool. The logged build predates new dynamic pool safeguards. Need controlled console A/B test, symbolization of `0xBADF5A`, and USB-vs-internal identical map tests; never infer specific engine function from offset alone.
+
+## Experimental bounded asset-pool extension (Oct 28)
+
+Commit `298eb8ce` increases the *additional-entry cap* only for selected relatively small asset-entry types: `localize` (22, 16 bytes/entry), `rawfile` (47, 24 bytes/entry), `scriptparsetree` (54, 24 bytes/entry), and `scriptbundle` (69, 48 bytes/entry). Their maximum tracked **added** entries becomes two times the original pool limit (versus one times before); the other tracked pools keep the existing cap. Growth remains strictly demand-driven when a pool free list becomes empty, and every successful mmap allocation counts toward a shared 64 MiB ceiling for additional plugin-owned pool blocks. This does not add 64 MiB immediately or reclaim the game's reserves.
+
+Console risk: this is experimental because game-native consumers may have hard-coded pool limits and the engine may allocate/free concurrently with the hook; a successful native build is not proof of safety. Test vanilla/official maps first, then custom internal and external maps, and review `[Pools]` logs. Revert cap change if asset corruption or regressions occur. Previously observed PS4 stalls did **not** establish pool exhaustion as the primary cause.
+
+## Source review after dev.20 (unreleased, pending validation)
+
+Found and patched a potential memory-corruption path in `t7_lua.cpp`: generated UI callback strings used `size_t used += snprintf(...)` even though the return value describes the *would-have-been* length, causing out-of-bounds pointer arithmetic when a fixed Lua script buffer filled. Replaced these calls with bounded `AppendLuaFormat`, reject truncated generated callbacks, reject truncated quoted arguments, and normalize null quoted strings. Source commits `ee9e07e0`, `5d503a23`, `58e066e8`.
+
+Found and patched another map-scanning race in `t7_maps.cpp`: `ListFolder` used a shared 64 KiB `sceKernelGetdents` buffer without serialization, and performed unbounded `strlen` on `d_name` without confirming its terminator lies inside `d_reclen`. Serialized buffer access, bounded filename reads with `memchr`, and copied only the validated bytes. Commit `511742c7`.
+
+These are **source-verified safeguards**, not proven fixes for GPU frame stalls (`0xBADF5A`) or server GSC VM exhaustion. No EBOOT memory capacity changes, force-free logic or GPU resets. Do not promote until host regressions and native build checks pass, followed by PS4/PS5 tests. No manual build initiated as part of this source-review pass.
+
+## Asset stream / GPU frame-path review (post dev.20 source pass)
+
+Commit `36cd97bc` hardens the custom compressed-block job hook by comparing ring offsets through subtraction, avoiding overflow in `data + hashed`, `ring + 0xA00000`, and `stored + 3`. The hook still delegates the original job and zeros suspect compressed/unpacked lengths as before; it does not rewrite GPU command lists. Texture-ready forced completion now requires both streamer started/done and zero pending work after the existing timeout. Earlier behavior blindly wrote a success value after timeout, potentially allowing gameplay before assets were ready. This may **prefer waiting/loading over prematurely continuing**; it does not repair missing/never-completing stream jobs. Monitor `[Stream]` and `[Stall]` logs, including long waits and GPU-frame completion labels on PS4. These common SPRX changes apply on PS5 too but the source alone does not prove identical engine offsets/build behavior.
+
+Remaining risks: no engine-code identification of `0xBADF5A`; GPU label snapshots are observational and do not imply that resetting GPU queues is safe. No GPU fence manipulation or VM memory clear applied. Run host regressions, native build, and console A/B tests before release.
