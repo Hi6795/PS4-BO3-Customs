@@ -403,7 +403,20 @@ void* Detour_Attach(Detour* This, uint64_t FunctionPtr, void* HookPtr, void** Ou
         // patched code could still jump to it.
         if (memcmp((void*)FunctionPtr, This->Original, PatchSize) != 0 &&
             !Detour_WriteVerified((void*)FunctionPtr, This->Original, PatchSize))
-            return 0; // Keep the mapping alive when restoring the original is impossible.
+        {
+            // The target may contain a partial jump. Keep ownership and the
+            // executable trampoline in the registry, so a subsequent attach
+            // cannot overwrite this damaged target or free its destination.
+            This->FunctionPtr = (void*)FunctionPtr;
+            This->HookPtr = HookPtr;
+            This->StubPtr = Stub;
+            This->MapPtr = MapPtr;
+            This->MapSize = DETOUR_MAP_SIZE;
+            This->PatchSize = PatchSize;
+            This->Installed = true;
+            g_hookedTargets[g_hookedCount++] = FunctionPtr;
+            return 0;
+        }
 
         sceKernelMunmap(MapPtr, DETOUR_MAP_SIZE);
         return 0;
