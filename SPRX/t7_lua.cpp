@@ -3180,7 +3180,11 @@ void T7Lua_Tick()
     ++g_ticks;
 
 #ifdef _DEBUG
-    if ((g_ticks % 6) == 0)
+    // Dvar-to-disk diagnostics have no frame-critical ordering requirement.
+    // Keep menu log feedback responsive; batch during active matches to
+    // avoid synchronously scanning/formatting logs ten times per second.
+    const uint32_t logInterval = T7Maps_InLevel() ? 30u : 6u;
+    if ((g_ticks % logInterval) == 0)
     {
         FlushDvarLog("bo3customs_gsc_log", "ScriptLog");
         if (!InMenus())
@@ -3202,8 +3206,9 @@ void T7Lua_Tick()
     {
         InjectScripts();
     }
-    else if (UiTryLock())
+    else if (!T7Maps_InLevel() && UiTryLock())
     {
+        // Lobby housekeeping does not need to run while the game is active.
         if (UiUp())
             RunLua(k_lobbyTickLua, "=bo3customs_lobbytick");
 
