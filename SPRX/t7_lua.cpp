@@ -1919,13 +1919,22 @@ static void AppendQuoted(char* out, size_t size, size_t* used, const char* text)
 
     out[(*used)++] = '"';
 
-    for (const unsigned char* c = (const unsigned char*)text; *c && *used + 4 < size; ++c)
+    const unsigned char* c = (const unsigned char*)text;
+    for (; *c && size - *used > 4; ++c)
     {
         if (*c == '"' || *c == '\\')
             out[(*used)++] = '\\';
 
         if (*c >= 0x20)
             out[(*used)++] = (char)*c;
+    }
+    if (*c)
+    {
+        // A partial quoted value is not a valid Lua argument. Mark this
+        // entire generated command as truncated so its caller skips RunLua.
+        out[size - 1] = 0;
+        *used = size;
+        return;
     }
 
     out[(*used)++] = '"';
