@@ -36,7 +36,7 @@ constexpr uintptr_t kStateTop   = 0x48;
 constexpr uintptr_t kStateStack = 0x60;
 
 constexpr uint32_t kUiErrorsLogged     = 100;
-constexpr uint32_t kMissingLogged      = 3000;
+constexpr uint32_t kMissingLogged      = 400;
 constexpr uint32_t kCommandsLogged     = 200;
 constexpr int      kShutdownNotes      = 8;
 constexpr int      kShutdownCallers    = 12;
