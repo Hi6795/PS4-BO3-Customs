@@ -21,6 +21,8 @@ prefix = r'''
 #include <string>
 #include <vector>
 static std::vector<std::string> lines;
+static bool inLevel=false;
+static bool T7Maps_InLevel() { return inLevel; }
 namespace T7Lua {
 static uintptr_t g_base=1;
 static unsigned g_ticks=0;
@@ -65,19 +67,19 @@ int main()
     assert(lines.size()==1 && lines[0].find("survives Lua error")!=std::string::npos);
     lines.clear();
     dvars["bo3customs_gsc_log"]="[ZM8P-LIFE] in-match event\nsecond line";
-    g_ticks=5; menus=false;
+    g_ticks=29; menus=false; inLevel=true;
     T7Lua_Tick(); // No UI lock or ready state, and not the menu injection cadence.
     assert(lines.size()==2 && lines[0].find("in-match event")!=std::string::npos);
     assert(lines[1]=="[ScriptLog] second line");
     assert(dvars["bo3customs_gsc_log"].empty());
     lines.clear();
     dvars["bo3customs_log"]="legacy in-match event";
-    g_ticks=11; T7Lua_Tick();
+    g_ticks=59; T7Lua_Tick();
     assert(lines.size()==1 && lines[0]=="[ScriptLog] legacy in-match event");
     lines.clear(); menus=true;
     dvars["bo3customs_gsc_log"]="dedicated channel in menu";
     dvars["bo3customs_log"]="pending menu event";
-    g_ticks=17; T7Lua_Tick();
+    g_ticks=17; inLevel=false; T7Lua_Tick();
     assert(lines.size()==1 && lines[0].find("dedicated channel")!=std::string::npos);
     assert(dvars["bo3customs_log"]=="pending menu event");
     puts("PASS: pending message ordering, Lua failure, in-match/no-UI capture and menu routing");
