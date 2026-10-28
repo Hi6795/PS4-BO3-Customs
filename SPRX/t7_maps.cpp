@@ -3477,7 +3477,16 @@ static uint64_t TexturesLoaded_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t
         LogStreamGate(now - start, logs % 6 == 1);
     }
 
-    if (now - start < kTextureWaitUs)
+    if (now < start || now - start < kTextureWaitUs)
+        return result;
+
+    // Never declare a custom level ready while the stream subsystem still
+    // reports pending work. It can strand the renderer on incomplete lighting
+    // and texture resources and turn a loading delay into a GPU-frame stall.
+    const int32_t pending = *(const volatile int32_t*)(g_base + kStreamPending);
+    const uint8_t streamStarted = *(const volatile uint8_t*)(g_base + kStreamStarted);
+    const uint8_t streamDone = *(const volatile uint8_t*)(g_base + kStreamDone);
+    if (pending != 0 || !streamStarted || !streamDone)
         return result;
 
     *value = 1;
@@ -4699,8 +4708,12 @@ static uint64_t BlockJob_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, u
         const uint32_t stored = *(uint32_t*)(slot + 0x40030);
         const uint64_t ring = *(uint64_t*)(g_base + kReadRing);
 
-        const bool outside = hashed && (data < ring || data + hashed > ring + 0xA00000);
-        const bool odd = hashed > stored + 3 || unpacked > 0x40000;
+        // Subtraction-based range validation avoids wrapping either end
+        // of the ring or the requested length on malformed stream blocks.
+        const bool outside = hashed && (!ring || data < ring ||
+                                      data - ring >= 0xA00000 ||
+                                      hashed > 0xA00000 - (data - ring));
+        const bool odd = (hashed > stored && hashed - stored > 3) || unpacked > 0x40000;
 
         if (outside || odd)
         {
