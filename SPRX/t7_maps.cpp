@@ -907,16 +907,16 @@ static int AddPackage(const char* name, bool map, const char* folder, const char
 static bool FindPackageFile(const Package& package, const char* rel, char* out, size_t size)
 {
     SceKernelStat st;
-    snprintf(out, size, "%s/%s", package.folder, rel);
-
-    if (sceKernelStat(out, &st) == 0)
+    // Do not stat a truncated path: it could resolve a different asset.
+    const int first = snprintf(out, size, "%s/%s", package.folder, rel);
+    if (first > 0 && (size_t)first < size && sceKernelStat(out, &st) == 0 && SCE_KERNEL_S_ISREG(st.st_mode))
         return true;
 
     if (!package.alternate[0])
         return false;
 
-    snprintf(out, size, "%s/%s", package.alternate, rel);
-    return sceKernelStat(out, &st) == 0;
+    const int second = snprintf(out, size, "%s/%s", package.alternate, rel);
+    return second > 0 && (size_t)second < size && sceKernelStat(out, &st) == 0 && SCE_KERNEL_S_ISREG(st.st_mode);
 }
 
 static void ScanUsermaps(const char* data)
@@ -1437,7 +1437,9 @@ static uint64_t FileOpen_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, u
                     {
                         if (strcmp(g_files[i].rel, rel) == 0)
                         {
-                            if (!nativeBootstrap)
+                            // A missing map-specific asset must never silently
+                            // load a different package's file with the same name.
+                            if (!nativeBootstrap && (mapPackage < 0 || g_files[i].package == mapPackage))
                                 found = i;
 #ifdef _DEBUG
                             else
