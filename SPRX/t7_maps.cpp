@@ -810,7 +810,9 @@ static int ListFolder(const char* folder, bool folders, char names[][kListedName
         {
             const SceKernelDirent* const entry = (const SceKernelDirent*)(buffer + at);
 
-            if (entry->d_reclen == 0)
+            // A damaged or truncated directory record must not advance past
+            // the getdents buffer and cause an out-of-bounds name read.
+            if (entry->d_reclen < 8 || entry->d_reclen > n - at)
                 break;
 
             at += entry->d_reclen;
@@ -843,9 +845,18 @@ static void AddFile(const char* rel, const char* folder, int package)
     if (g_fileCount >= kMaxFiles)
         return;
 
+    // The registry must never contain silently truncated paths: loading a
+    // different or nonexistent fastfile can leave the DB loader waiting.
+    if (strlen(rel) >= sizeof(g_files[0].rel))
+        return;
+    char path[sizeof(g_files[0].path)];
+    const int length = snprintf(path, sizeof(path), "%s/%s", folder, rel);
+    if (length < 0 || (size_t)length >= sizeof(path))
+        return;
+
     File& file = g_files[g_fileCount++];
     snprintf(file.rel, sizeof(file.rel), "%s", rel);
-    snprintf(file.path, sizeof(file.path), "%s/%s", folder, rel);
+    memcpy(file.path, path, (size_t)length + 1);
     file.package = package;
 }
 
@@ -1882,24 +1893,14 @@ static void RenameStackAsset(uint64_t asset)
 
 static PoolGrowth* GrowthFor(int32_t type)
 {
-    static int16_t index[128];
-    static bool built = false;
-
-    if (!built)
+    // Linking can run concurrently on database workers. Avoid publishing a
+    // mutable lookup table before it is completely initialized.
+    for (PoolGrowth& growth : g_poolGrowth)
     {
-        for (int16_t& slot : index)
-            slot = -1;
-
-        for (size_t i = 0; i < sizeof(g_poolGrowth) / sizeof(g_poolGrowth[0]); ++i)
-        {
-            if (g_poolGrowth[i].type >= 0 && g_poolGrowth[i].type < 128)
-                index[g_poolGrowth[i].type] = (int16_t)i;
-        }
-
-        built = true;
+        if (growth.type == type)
+            return &growth;
     }
-
-    return type >= 0 && type < 128 && index[type] >= 0 ? &g_poolGrowth[index[type]] : nullptr;
+    return nullptr;
 }
 
 static void GrowPool(int32_t type)
