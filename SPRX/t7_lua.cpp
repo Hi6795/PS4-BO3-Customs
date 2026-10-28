@@ -3032,7 +3032,11 @@ static void AddPcUtil()
     const uintptr_t L = g_base != 0 ? *(const uintptr_t*)(g_base + kLuaState) : 0;
     const bool fresh = L != g_pcUtilState;
 
-    if (L == 0 || (!fresh && !g_forceInject && (g_ticks % 6) != 0) || !UiUp() || !UiTryLock())
+    // Reinject UI compatibility helpers less frequently during gameplay.
+    // Their Lua compilation/dispatch is unnecessary every six rendered frames;
+    // freshly created UI states and explicit injection requests still run now.
+    const uint32_t interval = T7Maps_InLevel() ? 30u : 6u;
+    if (L == 0 || (!fresh && !g_forceInject && (g_ticks % interval) != 0) || !UiUp() || !UiTryLock())
         return;
 
     if (UiUp())
