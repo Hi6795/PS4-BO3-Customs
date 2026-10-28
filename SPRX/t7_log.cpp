@@ -238,6 +238,7 @@ static volatile uint32_t g_commands = 0;
 static volatile int32_t  g_lock = 0;
 static volatile uint32_t g_uiErrors = 0;
 static volatile uint32_t g_scriptErrors = 0;
+static std::atomic<bool> g_vmChildExhaustionSeen{false};
 static T7Diagnostics::ScriptErrorBudget g_scriptBudget;
 static volatile uint32_t g_missingCount = 0;
 static volatile uint64_t g_missingSeen[kMissingSlots];
@@ -976,6 +977,13 @@ static uint64_t ScriptError(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, 
     char message[192], dialog[192];
     ScriptText(raised, message);
     ScriptText(a4, dialog);
+    // We cannot safely clear the running GSC VM: doing so would invalidate
+    // live script references, event waiters and player state. Flag the first
+    // allocator exhaustion instead of swallowing the engine's error.
+    if (inst == 0 && strstr(message, "exceeded maximum number of child server script variables") &&
+        !g_vmChildExhaustionSeen.exchange(true, std::memory_order_acq_rel))
+        T7Log_Write("[VM] SERVER CHILD VARIABLE LIMIT REACHED (script error %u). Stop adding bots/players; "
+                    "the native VM cannot be safely reset mid-level. Check script ownership and map/mod compatibility.", count);
     using Budget = T7Diagnostics::ScriptErrorBudget;
     const Budget::Result note = g_scriptBudget.Observe(inst, a2, Budget::Hash(message, sizeof(message)),
                                                        Budget::Hash(dialog, sizeof(dialog)));
@@ -1481,6 +1489,7 @@ void T7Log_NewLevel()
 
     g_missingCount = 0;
     g_scriptErrors = 0;
+    g_vmChildExhaustionSeen.store(false, std::memory_order_release);
     ResetMissingImports();
     g_uiErrors = 0;
     g_commands = 0;
