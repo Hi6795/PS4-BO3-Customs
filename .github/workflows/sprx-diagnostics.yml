@@ -5,6 +5,8 @@ on:
     paths:
       - 'SPRX/t7_log.cpp'
       - 'SPRX/t7_maps.cpp'
+      - 'SPRX/t7_share.cpp'
+      - 'SPRX/t7_config.cpp'
       - 'SPRX/t7_lua.cpp'
       - 'SPRX/t7_lua.hpp'
       - 'SPRX/script_error_budget.hpp'
@@ -36,3 +38,4 @@ jobs:
           python3 SPRX/tests/bg_cache_snapshot_checks.py
           python3 SPRX/tests/missing_import_lifetime_checks.py
           python3 SPRX/tests/game_log_bridge_checks.py
+          python3 SPRX/tests/storage_safety_checks.py
