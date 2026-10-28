@@ -4166,12 +4166,18 @@ void T7Share_Install(uintptr_t base)
 {
     using namespace T7Share;
 
-    static bool installed = false;
-
-    if (installed || !base)
+    // Retry transient network/import and server-thread failures without
+    // starting duplicate workers or resetting live download state.
+    static std::atomic_flag installLock = ATOMIC_FLAG_INIT;
+    static bool asksStarted = false;
+    static bool peersInitialized = false;
+    if (!base || g_ready)
         return;
-
-    installed = true;
+    if (installLock.test_and_set(std::memory_order_acquire))
+        return;
+    struct Unlock { std::atomic_flag& flag; ~Unlock() { flag.clear(std::memory_order_release); } } unlock{installLock};
+    if (g_ready)
+        return;
     g_base = base;
 
     if (!RangeReadable(base + kNetworkMode, 4) || !RangeReadable(base + kClientSessions, kClientSessionSize * 2) ||
@@ -4189,19 +4195,29 @@ void T7Share_Install(uintptr_t base)
         return;
     }
 
-    for (UdpPeer& peer : g_peers)
+    if (!peersInitialized)
     {
-        peer.fd = -1;
-        peer.fdId = -1;
+        for (UdpPeer& peer : g_peers)
+        {
+            peer.fd = -1;
+            peer.fdId = -1;
+        }
+        peersInitialized = true;
     }
 
-    g_asks = (Ask*)Take(sizeof(Ask) * kUdpAsks);
-    ScePthread asks;
-
-    if (g_asks && ImportBound((const void*)&sceNetSendto) &&
-        scePthreadCreate(&asks, nullptr, Asks, nullptr, "BO3-Customs Share Game") == 0)
+    if (!g_asks)
+        g_asks = (Ask*)Take(sizeof(Ask) * kUdpAsks);
+    if (!asksStarted && g_asks && ImportBound((const void*)&sceNetSendto))
     {
-        scePthreadDetach(asks);
+        ScePthread asks;
+        if (scePthreadCreate(&asks, nullptr, Asks, nullptr, "BO3-Customs Share Game") == 0)
+        {
+            asksStarted = true;
+            scePthreadDetach(asks);
+        }
+    }
+    if (asksStarted && !g_udpReady)
+    {
         Detour_Attach(&g_dwReceiveDetour, (uint64_t)(base + kDwReceive), (void*)DwReceive_h, (void**)&g_dwReceive);
         g_udpReady = g_dwReceive != nullptr;
     }
@@ -4240,6 +4256,20 @@ void T7Share_Install(uintptr_t base)
 
 void T7Share_Tick()
 {
+    // The first install is performed during startup, but required network
+    // imports and the server worker may not yet be available. Retry at most
+    // once every five seconds, not on every rendered frame.
+    if (!T7Share::g_ready && T7Share::g_base)
+    {
+        static uint64_t lastRetry = 0;
+        const uint64_t now = sceKernelGetProcessTime();
+        if (!lastRetry || now - lastRetry >= 5000000ULL)
+        {
+            lastRetry = now;
+            T7Share_Install(T7Share::g_base);
+        }
+    }
+
     if (T7Share::g_ready)
     {
         T7Share::Evaluate(true);

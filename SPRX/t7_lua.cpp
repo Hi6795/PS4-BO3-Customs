@@ -1893,20 +1893,48 @@ static char* ReadScript(const char* name)
     return text;
 }
 
+static bool AppendLuaFormat(char* out, size_t size, size_t* used, const char* format, ...)
+{
+    if (*used >= size)
+        return false;
+    va_list args;
+    va_start(args, format);
+    const int n = vsnprintf(out + *used, size - *used, format, args);
+    va_end(args);
+    if (n < 0 || (size_t)n >= size - *used)
+    {
+        *used = size;
+        return false;
+    }
+    *used += (size_t)n;
+    return true;
+}
+
 static void AppendQuoted(char* out, size_t size, size_t* used, const char* text)
 {
-    if (*used + 3 >= size)
+    if (!text)
+        text = "";
+    if (*used >= size || size - *used <= 3)
         return;
 
     out[(*used)++] = '"';
 
-    for (const unsigned char* c = (const unsigned char*)text; *c && *used + 4 < size; ++c)
+    const unsigned char* c = (const unsigned char*)text;
+    for (; *c && size - *used > 4; ++c)
     {
         if (*c == '"' || *c == '\\')
             out[(*used)++] = '\\';
 
         if (*c >= 0x20)
             out[(*used)++] = (char)*c;
+    }
+    if (*c)
+    {
+        // A partial quoted value is not a valid Lua argument. Mark this
+        // entire generated command as truncated so its caller skips RunLua.
+        out[size - 1] = 0;
+        *used = size;
+        return;
     }
 
     out[(*used)++] = '"';
@@ -1916,14 +1944,16 @@ static void AppendQuoted(char* out, size_t size, size_t* used, const char* text)
 static void ReportUninstall(const char* map, bool removed, const char* message)
 {
     char lua[1024];
-    size_t used = (size_t)snprintf(lua, sizeof(lua), "%s",
+    size_t used = 0;
+    AppendLuaFormat(lua, sizeof(lua), &used, "%s",
                                    "local tabs = rawget(_G, 'BO3CustomsMapTabs')\n"
                                    "if tabs ~= nil and tabs.Uninstalled ~= nil then tabs.Uninstalled(");
     AppendQuoted(lua, sizeof(lua), &used, map);
-    used += (size_t)snprintf(lua + used, sizeof(lua) - used, ", %s, ", removed ? "true" : "false");
+    AppendLuaFormat(lua, sizeof(lua), &used, ", %s, ", removed ? "true" : "false");
     AppendQuoted(lua, sizeof(lua), &used, message);
-    snprintf(lua + used, sizeof(lua) - used, ") end\n");
-    RunLua(lua, "=bo3customs_uninstalled");
+    AppendLuaFormat(lua, sizeof(lua), &used, ") end\n");
+    if (used < sizeof(lua))
+        RunLua(lua, "=bo3customs_uninstalled");
 }
 
 static void HandleUninstall()
@@ -1958,14 +1988,16 @@ static void HandleUninstall()
 static void ReportModChoice(const char* name, int state, const char* message)
 {
     char lua[1536];
-    size_t used = (size_t)snprintf(lua, sizeof(lua), "%s",
+    size_t used = 0;
+    AppendLuaFormat(lua, sizeof(lua), &used, "%s",
                                    "local ui = rawget(_G, 'BO3CustomsModsUI')\n"
                                    "if ui ~= nil and ui.Applied ~= nil then ui.Applied(");
     AppendQuoted(lua, sizeof(lua), &used, name);
-    used += (size_t)snprintf(lua + used, sizeof(lua) - used, ", %d, ", state);
+    AppendLuaFormat(lua, sizeof(lua), &used, ", %d, ", state);
     AppendQuoted(lua, sizeof(lua), &used, message);
-    snprintf(lua + used, sizeof(lua) - used, ") end\n");
-    RunLua(lua, "=bo3customs_mod_applied");
+    AppendLuaFormat(lua, sizeof(lua), &used, ") end\n");
+    if (used < sizeof(lua))
+        RunLua(lua, "=bo3customs_mod_applied");
 }
 
 static void HandleModChoice()
@@ -2074,22 +2106,24 @@ static void ShowShare()
             }
 
             char lua[1792];
-            size_t used = (size_t)snprintf(lua, sizeof(lua), "%s",
+            size_t used = 0;
+    AppendLuaFormat(lua, sizeof(lua), &used, "%s",
                                            "local share = rawget(_G, 'BO3CustomsShare')\n"
                                            "if share ~= nil and share.Show ~= nil then share.Show(");
 
             for (const char* const text : { status.title, status.name, status.detail, status.file })
             {
                 AppendQuoted(lua, sizeof(lua), &used, text);
-                used += (size_t)snprintf(lua + used, sizeof(lua) - used, ", ");
+                AppendLuaFormat(lua, sizeof(lua), &used, ", ");
             }
 
-            used += (size_t)snprintf(lua + used, sizeof(lua) - used, "%d / 1000, ", (int)(status.fraction * 1000.0f));
+            AppendLuaFormat(lua, sizeof(lua), &used, "%d / 1000, ", (int)(status.fraction * 1000.0f));
             AppendQuoted(lua, sizeof(lua), &used, status.failed ? "" : "Press Circle to cancel and leave the lobby");
-            used += (size_t)snprintf(lua + used, sizeof(lua) - used, ", ");
+            AppendLuaFormat(lua, sizeof(lua), &used, ", ");
             AppendQuoted(lua, sizeof(lua), &used, status.speeds);
-            snprintf(lua + used, sizeof(lua) - used, ") end\n");
-            shown = RunLua(lua, "=bo3customs_share_show") || shown;
+            AppendLuaFormat(lua, sizeof(lua), &used, ") end\n");
+            if (used < sizeof(lua))
+                shown = RunLua(lua, "=bo3customs_share_show") || shown;
         }
     }
 
@@ -2900,13 +2934,15 @@ static uint64_t Require_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, ui
         T7Maps_ModSave(save, sizeof(save));
 
         char lua[512];
-        size_t used = (size_t)snprintf(lua, sizeof(lua), "rawset(_G, 'BO3CustomsDllUgc', ");
+        size_t used = 0;
+    AppendLuaFormat(lua, sizeof(lua), &used, "rawset(_G, 'BO3CustomsDllUgc', ");
         AppendQuoted(lua, sizeof(lua), &used, ugc);
-        used += (size_t)snprintf(lua + used, sizeof(lua) - used, ")\nrawset(_G, 'BO3CustomsDllSave', ");
+        AppendLuaFormat(lua, sizeof(lua), &used, ")\nrawset(_G, 'BO3CustomsDllSave', ");
         AppendQuoted(lua, sizeof(lua), &used, save);
-        snprintf(lua + used, sizeof(lua) - used, ")\nrawset(_G, 'BO3CustomsDllMod', %s)\n", dll ? "true" : "false");
+        AppendLuaFormat(lua, sizeof(lua), &used, ")\nrawset(_G, 'BO3CustomsDllMod', %s)\n", dll ? "true" : "false");
 
-        RunLuaOn(L, lua, "=bo3customs_dll_ugc");
+        if (used < sizeof(lua))
+            RunLuaOn(L, lua, "=bo3customs_dll_ugc");
         RunLuaOn(L, k_dllStandInLua, "=bo3customs_dll");
         UiUnlock();
     }
@@ -2996,7 +3032,11 @@ static void AddPcUtil()
     const uintptr_t L = g_base != 0 ? *(const uintptr_t*)(g_base + kLuaState) : 0;
     const bool fresh = L != g_pcUtilState;
 
-    if (L == 0 || (!fresh && !g_forceInject && (g_ticks % 6) != 0) || !UiUp() || !UiTryLock())
+    // Reinject UI compatibility helpers less frequently during gameplay.
+    // Their Lua compilation/dispatch is unnecessary every six rendered frames;
+    // freshly created UI states and explicit injection requests still run now.
+    const uint32_t interval = T7Maps_InLevel() ? 30u : 6u;
+    if (L == 0 || (!fresh && !g_forceInject && (g_ticks % interval) != 0) || !UiUp() || !UiTryLock())
         return;
 
     if (UiUp())
@@ -3140,7 +3180,11 @@ void T7Lua_Tick()
     ++g_ticks;
 
 #ifdef _DEBUG
-    if ((g_ticks % 6) == 0)
+    // Dvar-to-disk diagnostics have no frame-critical ordering requirement.
+    // Keep menu log feedback responsive; batch during active matches to
+    // avoid synchronously scanning/formatting logs ten times per second.
+    const uint32_t logInterval = T7Maps_InLevel() ? 30u : 6u;
+    if ((g_ticks % logInterval) == 0)
     {
         FlushDvarLog("bo3customs_gsc_log", "ScriptLog");
         if (!InMenus())
@@ -3162,8 +3206,9 @@ void T7Lua_Tick()
     {
         InjectScripts();
     }
-    else if (UiTryLock())
+    else if (!T7Maps_InLevel() && UiTryLock())
     {
+        // Lobby housekeeping does not need to run while the game is active.
         if (UiUp())
             RunLua(k_lobbyTickLua, "=bo3customs_lobbytick");
 

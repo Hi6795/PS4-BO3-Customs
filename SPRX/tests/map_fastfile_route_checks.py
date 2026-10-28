@@ -120,6 +120,17 @@ int main()
     assert(FileOpen_h((uintptr_t)"/app0/zone/snd/en/zm_ds_house_zw.sabl",0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
     assert(actualPath=="/ext0/BO3-Customs/usermaps/zm_ds_house_zw/snd/en/zm_ds_house_zw.sabl");
     exists=false;
+    // A colliding filename belonging to another package must not be used.
+    std::strcpy(g_files[3].rel, "zm_ds_house_zw.ff");
+    std::strcpy(g_files[3].path, "/ext0/other/zm_ds_house_zw.ff");
+    g_files[3].package=12;
+    assert(FileOpen_h((uintptr_t)request,0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
+    assert(actualPath==request);
+    // A registered fallback in the owning package is still permitted.
+    g_files[3].package=0;
+    assert(FileOpen_h((uintptr_t)request,0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
+    assert(actualPath==g_files[3].path);
+    g_files[3].package=12;
     assert(FileOpen_h((uintptr_t)request,0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
     assert(actualPath==request);
     assert(FileOpen_h((uintptr_t)"/app0/zone/other.ff",0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
