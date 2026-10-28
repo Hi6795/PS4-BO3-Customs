@@ -909,14 +909,14 @@ static bool FindPackageFile(const Package& package, const char* rel, char* out, 
     SceKernelStat st;
     // Do not stat a truncated path: it could resolve a different asset.
     const int first = snprintf(out, size, "%s/%s", package.folder, rel);
-    if (first > 0 && (size_t)first < size && sceKernelStat(out, &st) == 0 && SCE_KERNEL_S_ISREG(st.st_mode))
+    if (first > 0 && (size_t)first < size && sceKernelStat(out, &st) == 0 && ((st.st_mode & 0170000) == 0100000))
         return true;
 
     if (!package.alternate[0])
         return false;
 
     const int second = snprintf(out, size, "%s/%s", package.alternate, rel);
-    return second > 0 && (size_t)second < size && sceKernelStat(out, &st) == 0 && SCE_KERNEL_S_ISREG(st.st_mode);
+    return second > 0 && (size_t)second < size && sceKernelStat(out, &st) == 0 && ((st.st_mode & 0170000) == 0100000);
 }
 
 static void ScanUsermaps(const char* data)
