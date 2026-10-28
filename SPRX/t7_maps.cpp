@@ -6217,10 +6217,15 @@ static void InstallHooks(uintptr_t base)
     if (g_hooksInstalled)
         return;
 
-    g_hooksInstalled = true;
-
-    for (const SignaturePatch& patch : k_signaturePatches)
-        RemoveSignaturePenalty(base, patch);
+    // One-shot signature adjustments should not be repeated if a required
+    // hook fails and a later refresh retries the detour installation.
+    static bool signaturePatchesChecked = false;
+    if (!signaturePatchesChecked)
+    {
+        for (const SignaturePatch& patch : k_signaturePatches)
+            RemoveSignaturePenalty(base, patch);
+        signaturePatchesChecked = true;
+    }
 
     Detour_Attach(&g_openDetour, (uint64_t)(base + kFileOpen), (void*)FileOpen_h, &g_openOriginal);
     Detour_Attach(&g_existsDetour, (uint64_t)(base + kMapExists), (void*)MapExists_h, &g_existsOriginal);
@@ -6375,6 +6380,15 @@ static void InstallHooks(uintptr_t base)
         Detour_Attach(&g_dispatchDetour, (uint64_t)(base + kDispatch), (void*)Dispatch_h, &g_dispatchOriginal);
     }
 #endif
+
+    // Mark the essential map hooks ready only when they really have originals.
+    // A later refresh can retry missing hooks; Detour_Attach is idempotent for
+    // already-installed Detour objects.
+    g_hooksInstalled = g_openOriginal && g_existsOriginal && g_validOriginal && g_loadOriginal;
+    if (!g_hooksInstalled)
+        T7Log_Write("[Maps] required hook unavailable (open=%d exists=%d valid=%d load=%d); will retry on refresh",
+                    g_openOriginal != nullptr, g_existsOriginal != nullptr,
+                    g_validOriginal != nullptr, g_loadOriginal != nullptr);
 }
 }
 
