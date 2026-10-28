@@ -4627,10 +4627,32 @@ static void TraceMapFastfilePreflight(const char* level)
 }
 #endif
 
+static void TraceBgCacheState(const char* when)
+{
+#ifdef _DEBUG
+    // PS4 1.33 compares the two trailing words at this guarded instruction.
+    // Read the native result only: never reset or forge a matching checksum.
+    constexpr uintptr_t check = 0x7C928E;
+    constexpr uintptr_t wordsAt = 0x1F276DC;
+    static const uint8_t signature[] = { 0x4C, 0x89, 0xF2, 0x48, 0xC1, 0xEA, 0x20, 0x44, 0x39, 0xF2 };
+    if (!g_base || !RangeReadable(g_base + check, sizeof(signature)) ||
+        memcmp((const void*)(g_base + check), signature, sizeof(signature)) != 0 ||
+        !RangeReadable(g_base + wordsAt, 3 * sizeof(uint32_t)))
+        return;
+    uint32_t words[3];
+    memcpy(words, (const void*)(g_base + wordsAt), sizeof(words));
+    T7Log_Write("[BGCache] %s: cached=0x%08X received=0x%08X computed=0x%08X match=%d",
+                when ? when : "snapshot", words[0], words[1], words[2], words[1] == words[2] ? 1 : 0);
+#else
+    (void)when;
+#endif
+}
+
 static void TraceModTransition(const char* when, const char* level)
 {
 #ifdef _DEBUG
     if (!g_base) return;
+    TraceBgCacheState(when);
     if (level && strcmp(level, "core_frontend") != 0 && strcmp(when, "before level zones") == 0)
         TraceMapFastfilePreflight(level);
     const int loadedMode = LoadedModeCommon();

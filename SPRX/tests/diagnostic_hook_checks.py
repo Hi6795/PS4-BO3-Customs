@@ -133,6 +133,7 @@ static bool ZoneLoaded(const char* z) { return std::strcmp(z,"zm_mod")==0; }
 static int ChosenForLoad(char (*names)[kNameMax]) { std::strcpy(names[0],"zm8p"); return 1; }
 static unsigned mapPreflights=0;
 static void TraceMapFastfilePreflight(const char*) { ++mapPreflights; }
+static void TraceBgCacheState(const char*) {}
 '''
 
 TRANSITION_MAIN = r'''

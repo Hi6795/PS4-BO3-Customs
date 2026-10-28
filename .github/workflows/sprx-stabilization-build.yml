@@ -28,6 +28,7 @@ jobs:
           python3 -m unittest discover -s .github/scripts/tests -v
           for test in \
             SPRX/tests/diagnostic_hook_checks.py \
+            SPRX/tests/bg_cache_snapshot_checks.py \
             SPRX/tests/frontend_reload_checks.py \
             SPRX/tests/game_log_bridge_checks.py \
             SPRX/tests/map_fastfile_route_checks.py \
