@@ -1336,48 +1336,27 @@ static const File* StackFile(const char* rel)
     return nullptr;
 }
 
-static uint64_t FileOpen_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
-                           double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
+static bool LanguagePrefixed(const char* name);
+
+// The front-end and base engine bootstrap zones must come from the installed
+// game. A shared custom zone with the same filename must never replace them:
+// its contents need not have the asset/layout contract of the retail zone.
+// Keep core_mod exempt; it is the supported custom mod-zone name.
+static bool NativeBootstrapFile(const char* rel)
 {
-    const char* const path = (const char*)a1;
+    if (!rel || !IsZoneFile(rel))
+        return false;
 
-    if (path)
-    {
-        const char* const rel = Relative(path);
+    const char* const slash = strrchr(rel, '/');
+    const char* name = slash ? slash + 1 : rel;
 
-        if (rel)
-        {
-            ListReader reading;
-            int found = -1;
-            const File* const mod = StackFile(rel);
+    if (LanguagePrefixed(name))
+        name += 3;
 
-            if (mod)
-            {
-                a1 = (uint64_t)mod->path;
-            }
-            else
-            {
-                for (int i = 0; i < g_fileCount; ++i)
-                {
-                    if (strcmp(g_files[i].rel, rel) == 0)
-                    {
-                        found = i;
-                        break;
-                    }
-                }
+    if (strncmp(name, "core_", 5) != 0 || strncmp(name, "core_mod.", 9) == 0)
+        return false;
 
-                if (found < 0)
-                    found = LanguageCompanion(rel);
-
-                if (found >= 0)
-                {
-                    a1 = (uint64_t)g_files[found].path;
-                }
-            }
-        }
-    }
-
-    return ((Hook_t)g_openOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
+    return true;
 }
 
 static int MapPackage(const char* name)
@@ -1389,6 +1368,119 @@ static int MapPackage(const char* name)
     }
 
     return -1;
+}
+
+// The global redirected-file table is bounded and may be full when many maps
+// are installed. Resolve a discovered map's zone files independently of that
+// table, including language variants and sound-bank subdirectories.
+static int MapPackageFile(const char* rel)
+{
+    if (!rel || !IsZoneFile(rel))
+        return -1;
+
+    const char* const slash = strrchr(rel, '/');
+    const char* const basename = slash ? slash + 1 : rel;
+    const char* const extension = strrchr(basename, '.');
+    if (!extension)
+        return -1;
+
+    const size_t length = (size_t)(extension - basename);
+    if (!length || length >= kNameMax)
+        return -1;
+
+    char name[kNameMax];
+    memcpy(name, basename, length);
+    name[length] = 0;
+
+    const int exact = MapPackage(name);
+    if (exact >= 0)
+        return exact;
+
+    return length > 3 && LanguagePrefixed(name) ? MapPackage(name + 3) : -1;
+}
+
+static uint64_t FileOpen_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
+                           double x0, double x1, double x2, double x3, double x4, double x5, double x6, double x7)
+{
+    const char* const path = (const char*)a1;
+    char mapPath[256] = {};
+#ifdef _DEBUG
+    char diagnosticRel[128] = {};
+    int diagnosticPackage = -1;
+#endif
+
+    if (path)
+    {
+        const char* const rel = Relative(path);
+
+        if (rel)
+        {
+            ListReader reading;
+            int found = -1;
+            const bool nativeBootstrap = NativeBootstrapFile(rel);
+            const File* const mod = nativeBootstrap ? nullptr : StackFile(rel);
+
+            if (mod)
+            {
+                a1 = (uint64_t)mod->path;
+            }
+            else
+            {
+                const int mapPackage = nativeBootstrap ? -1 : MapPackageFile(rel);
+                if (mapPackage >= 0 && FindPackageFile(g_packages[mapPackage], rel, mapPath, sizeof(mapPath)))
+                {
+                    a1 = (uint64_t)mapPath;
+                }
+                else
+                {
+                    for (int i = 0; i < g_fileCount; ++i)
+                    {
+                        if (strcmp(g_files[i].rel, rel) == 0)
+                        {
+                            if (!nativeBootstrap)
+                                found = i;
+#ifdef _DEBUG
+                            else
+                                T7Log_Write("[Routing] ignored custom override of native bootstrap %s at %s", rel,
+                                            g_files[i].path);
+#endif
+                            break;
+                        }
+                    }
+
+                    if (!nativeBootstrap && found < 0)
+                        found = LanguageCompanion(rel);
+
+                    if (found >= 0)
+                        a1 = (uint64_t)g_files[found].path;
+                }
+#ifdef _DEBUG
+                if (mapPackage >= 0)
+                {
+                    diagnosticPackage = mapPackage;
+                    snprintf(diagnosticRel, sizeof(diagnosticRel), "%s", rel);
+                }
+#endif
+            }
+        }
+    }
+
+#ifdef _DEBUG
+    const char* const routed = (const char*)a1;
+    const bool externalRedirect = path && routed != path &&
+                                  (strncmp(routed, "/ext", 4) == 0 || strncmp(routed, "/usb", 4) == 0);
+    const uint64_t openedAt = externalRedirect ? sceKernelGetProcessTime() : 0;
+#endif
+    const uint64_t result = ((Hook_t)g_openOriginal)(a1, a2, a3, a4, a5, a6, x0, x1, x2, x3, x4, x5, x6, x7);
+#ifdef _DEBUG
+    if (diagnosticPackage >= 0)
+        T7Log_Write("[MapLoad] open %s -> %s (package %s, fd %d)", diagnosticRel, (const char*)a1,
+                    g_packages[diagnosticPackage].name, (int32_t)result);
+    else if (externalRedirect)
+        T7Log_Write("[Routing] external open %s -> %s: fd %d, call %llu us", path, routed, (int32_t)result,
+                    (unsigned long long)(sceKernelGetProcessTime() - openedAt));
+#endif
+    return result;
 }
 
 static uint64_t MapExists_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
@@ -4412,10 +4504,33 @@ static void ApplyModsNow()
         ReloadFrontend("a mod with menu files was unloaded");
 }
 
+#ifdef _DEBUG
+static void TraceMapFastfilePreflight(const char* level)
+{
+    ListReader reading;
+    const int package = MapPackage(level);
+    if (package >= 0)
+    {
+        char filename[kNameMax + 4];
+        char resolved[256] = {};
+        SceKernelStat st{};
+        snprintf(filename, sizeof(filename), "%s.ff", level);
+        const bool registered = FindPackageFile(g_packages[package], filename, resolved, sizeof(resolved));
+        const int statResult = registered ? sceKernelStat(resolved, &st) : -1;
+        T7Log_Write("[MapLoad] preflight %s: ff=%s, path=%s, size=%lld, files=%d/%d",
+                    level, registered && statResult == 0 ? "present" : "MISSING",
+                    resolved[0] ? resolved : "(unresolved)",
+                    statResult == 0 ? (long long)st.st_size : -1LL, g_fileCount, kMaxFiles);
+    }
+}
+#endif
+
 static void TraceModTransition(const char* when, const char* level)
 {
 #ifdef _DEBUG
     if (!g_base) return;
+    if (level && strcmp(level, "core_frontend") != 0 && strcmp(when, "before level zones") == 0)
+        TraceMapFastfilePreflight(level);
     const int loadedMode = LoadedModeCommon();
     const int sessionMode = SessionModeCommon();
     char names[kMaxStack][kNameMax];

@@ -130,6 +130,8 @@ static int SessionModeCommon() { return 2; }
 static bool ModeCommonOnTop() { return false; }
 static bool ZoneLoaded(const char* z) { return std::strcmp(z,"zm_mod")==0; }
 static int ChosenForLoad(char (*names)[kNameMax]) { std::strcpy(names[0],"zm8p"); return 1; }
+static unsigned mapPreflights=0;
+static void TraceMapFastfilePreflight(const char*) { ++mapPreflights; }
 '''
 
 TRANSITION_MAIN = r'''
@@ -176,7 +178,7 @@ int main()
     assert(originals==1 && applies==1);
     std::strcpy(level,"core_frontend");
     assert(LoadLevelZones_h((uintptr_t)level,2,3,4,5,6,0,1,2,3,4,5,6,7)==999);
-    assert(originals==2 && applies==1);
+    assert(originals==2 && applies==1 && mapPreflights==1);
     assert(T7Lua::locks==T7Lua::unlocks);
     bool found=false;
     for (const auto& line:lines)
@@ -255,6 +257,7 @@ def main():
     assert 'TraceModTransition("prepared level zones", diagnosticLevel)' in maps
     assert '"core-mod=%d zm-mod=%d mp-mod=%d cp-mod=%d' in maps
     assert 'native level-zone result for %s: 0x%llX' in maps
+    assert 'TraceMapFastfilePreflight(level);' in maps
     assert "static int ScriptOwner(const char* script)" in maps
     assert "void T7Maps_TraceDiagnostics(const char* reason)" in maps
     assert 'T7Maps_TraceDiagnostics("clientfield mismatch")' in LOG
