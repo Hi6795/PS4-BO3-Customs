@@ -719,6 +719,10 @@ static PoolGrowth g_poolGrowth[] =
 constexpr uint32_t kPoolStepMin  = 8;
 constexpr uint32_t kPoolStepMax  = 4096;
 constexpr uint32_t kPoolExtraMin = 64;
+// Conservative total mapped-memory ceiling for extra plugin-owned pool blocks.
+// This does not reclaim or change the game's native memory reservations.
+constexpr size_t kPoolGrowthBudget = 64u * 1024u * 1024u;
+static size_t g_poolGrowthBytes = 0;
 // Pool metadata is shared by asset-link workers. Only one thread may append
 // entries to the game's free list or update a tracked growth record at a time.
 static std::atomic_flag g_poolGrowthLock = ATOMIC_FLAG_INIT;
@@ -1923,7 +1927,13 @@ static void GrowPool(int32_t type)
         ~GrowthUnlock() { g_poolGrowthLock.clear(std::memory_order_release); }
     } unlock;
 
-    const uint32_t most = growth->limit < kPoolExtraMin ? kPoolExtraMin : growth->limit;
+    // Allow selected low-per-entry-cost asset pools to reach triple their
+    // initial capacity (two extra originals), without enlarging heavy sound,
+    // model, animation or material pools globally.
+    const bool extraRoom = type == kScriptParseTree || type == kRawFileAsset || type == 22 || type == 69;
+    const uint32_t multiplier = extraRoom ? 2u : 1u;
+    const uint32_t ordinary = growth->limit < kPoolExtraMin ? kPoolExtraMin : growth->limit;
+    const uint32_t most = ordinary > UINT32_MAX / multiplier ? UINT32_MAX : ordinary * multiplier;
     if (pool->free || pool->single || pool->size != growth->size ||
         (uint64_t)pool->limit != (uint64_t)growth->limit + growth->grown)
         return;
@@ -1948,6 +1958,17 @@ static void GrowPool(int32_t type)
         rawBytes > SIZE_MAX - 0x3FFF)
         return;
     const size_t bytes = (rawBytes + 0x3FFF) & ~(size_t)0x3FFF;
+    if (g_poolGrowthBytes > kPoolGrowthBudget || bytes > kPoolGrowthBudget - g_poolGrowthBytes)
+    {
+        if (!growth->capped)
+        {
+            growth->capped = true;
+            T7Log_Write("[Pools] %s cannot grow: plugin asset-pool memory budget reached (%llu / %llu bytes)",
+                        growth->name, (unsigned long long)g_poolGrowthBytes,
+                        (unsigned long long)kPoolGrowthBudget);
+        }
+        return;
+    }
     void* block = nullptr;
 
     if (sceKernelMmap(0, bytes, 1 | 2, 0x1000 | 0x2, -1, 0, &block) < 0 || !block)
@@ -1968,6 +1989,7 @@ static void GrowPool(int32_t type)
     pool->free = (uintptr_t)block;
     pool->limit += step;
     growth->grown += step;
+    g_poolGrowthBytes += bytes;
 }
 
 static uint64_t LinkXAsset_h(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
