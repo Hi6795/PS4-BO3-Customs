@@ -243,8 +243,9 @@ static uint64_t MakePicture(const char* name, const char** failure, bool logFail
     const bool mod = strncmp(name, T7_MOD_PREVIEW_PREFIX, sizeof(T7_MOD_PREVIEW_PREFIX) - 1) == 0;
     const bool preview = mod || strncmp(name, T7_USERMAP_PREVIEW_PREFIX, sizeof(T7_USERMAP_PREVIEW_PREFIX) - 1) == 0;
     const char* const map = name + (preview ? sizeof(T7_USERMAP_PREVIEW_PREFIX) : sizeof(T7_USERMAP_LOADING_PREFIX)) - 1;
-    const char* const previewFile = preview && !mod ? T7Maps_PreviewFile(map) : nullptr;
-    const char* const file = preview ? (previewFile ? previewFile : "previewimage.png") : "loadingimage.png";
+    char previewFile[288] = {};
+    const bool hasPreview = preview && !mod && T7Maps_PreviewFile(map, previewFile, sizeof(previewFile));
+    const char* const file = preview ? (hasPreview ? previewFile : "previewimage.png") : "loadingimage.png";
     const int width = preview ? kPreviewWidth : kLoadingWidth;
     const int height = preview ? kPreviewHeight : kLoadingHeight;
 

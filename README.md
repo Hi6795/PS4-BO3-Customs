@@ -41,6 +41,25 @@ If your console runs an FTP server, the tool does steps 1, 2 and 4 for you: see 
 
 Mods and maps that save (stats, settings) keep their files in `/data/BO3-Customs/saves/<mod or map>/`.
 
+## Recovering from a broken mod
+
+Fully close BO3 and launch it again. Selected mods start disabled on a fresh game
+process; `active_mod.txt` is not automatically loaded. This remains true if the
+console cannot delete that file. Returning to the main menu or restarting a map
+is not a full restart and can retain loaded mod code.
+
+Once back in the menu, leave the broken mod unticked. To remove it, close BO3
+and remove only that mod's folder from the location where it was installed:
+`/data/BO3-Customs/mods/` or the external drive's `BO3-Customs/mods/` folder.
+Installed files and map/mod saves are separate; removing a mod does not require
+removing your game save or the `BO3-Customs/saves/` folder.
+
+If a host sends the same broken mod again, avoid rejoining that lobby until the
+host disables or replaces it. Host-session activation can load mods again after
+startup. Menu recovery can automatically untick a local UI mod whose menus fail
+to build, but it cannot recover from every native crash or freeze; use a full
+restart in that case.
+
 ## USB and extended storage
 
 Maps and mods can also sit on a USB drive or extended storage, in a `BO3-Customs` folder at the root of the drive
@@ -64,6 +83,37 @@ Grab it before you start the game again: every launch starts a new log.
 
 Also attach the tool's log for the map that causes the issue: press **Log** in the tool, then **Save**.
 If the tool was closed since, its logs are in `work\analysis\gui_logs` beside the tool.
+
+### DEBUG GPU/streaming captures (dev.26)
+
+The source now adds `[GPU]` records to the existing `/data/BO3-Customs/log.txt`
+and debug-output path. They run on the existing watchdog, with up to seven
+early checkpoints in the first 30 seconds of a custom level and snapshots at
+the existing stall-report intervals. No extra rendering-thread logging, GPU
+queue resets or forced completion values are used.
+
+Each capture includes the copied level/routed-mod context, observed GPU
+completed/waited/building frame values, changes since the previous sample,
+client-frame age, asset-link counter, pending streaming, missing required image
+and mesh parts, lighting-blob counts and sound-loading fraction. Unreadable
+fields are marked unavailable; their zero values must not be interpreted as
+successful loading. Resource counters are observations taken over time, not an
+atomic engine snapshot or an automatic crash diagnosis.
+
+An unchanged GPU value alone does not prove a GPU fault: the CPU may have
+stopped submitting work. Include the surrounding `[Stall]` thread samples,
+`[Stream]` entries and engine errors so those cases can be distinguished.
+Loading/early-level stalls and later engine-idle stalls are labeled separately.
+Compute-record snapshots repeat on the bounded stall rounds for comparison.
+
+For a useful report, start a fresh BO3 process, reproduce one failing map run,
+and save the log before starting BO3 again. Record PS4/PS5, the exact SPRX build,
+map/version, internal or external storage and every enabled mod. If possible,
+compare the identical converted files internally and externally with mods off.
+The existing diagnostic memory buffer is capped at 256 KiB per game process;
+fresh runs preserve room for the failure instead of accumulating unrelated runs.
+These additions are included in dev.26 DEBUG. They collect evidence and do not
+by themselves fix or prove the cause of a map freeze.
 
 ## Console layout
 

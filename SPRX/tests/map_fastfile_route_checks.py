@@ -24,23 +24,29 @@ def extract(signature):
 
 PREFIX = r'''
 #include <cassert>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #define _DEBUG
 constexpr int kNameMax=56, kMaxFiles=1536;
-struct Package { char name[kNameMax]; char folder[224]; char alternate[224]; bool map; };
+struct Package { char name[kNameMax]; char folder[224]; char alternate[224]; char preview[288]; bool map; };
 struct File { char rel[128]; char path[224]; int package; };
-static Package g_packages[1]={{"zm_ds_house_zw", "/ext0/BO3-Customs/usermaps/zm_ds_house_zw", "", true}};
+static Package g_packages[1]={{"zm_ds_house_zw", "/ext0/BO3-Customs/usermaps/zm_ds_house_zw", "", "preview.png", true}};
 static int g_packageCount=1;
 static File g_files[kMaxFiles] = {};
 static int g_fileCount=kMaxFiles;
-struct ListReader { ListReader() {} };
+static int readers=0;
+struct ListReader { ListReader() { ++readers; } ~ListReader() { --readers; } };
+namespace T7Maps {}
+static uintptr_t g_base=1;
 static uint64_t sceKernelGetProcessTime() { return 5000000; }
 static bool overrideEnabled=false, exists=true;
 static File overrideFile={"zm_ds_house_zw.ff", "/data/mod-overrides/zm_ds_house_zw.ff", 0};
 static std::string actualPath;
+static std::string loggedPackage;
+static bool refreshDuringOpen=false;
 static bool EqualsNoCase(const char* a,const char* b) { return std::strcmp(a,b)==0; }
 static bool EndsWith(const char* a,const char* b)
 {
@@ -63,12 +69,24 @@ static bool FindPackageFile(const Package& p,const char* rel,char* out,size_t si
     return true;
 }
 static int LanguageCompanion(const char*) { return -1; }
-static void T7Log_Write(const char*,...) {}
+static void T7Log_Write(const char* format,...) {
+    if(std::strstr(format,"[MapLoad] open")) {
+        va_list args; va_start(args,format);
+        (void)va_arg(args,const char*); (void)va_arg(args,const char*);
+        loggedPackage=va_arg(args,const char*); va_end(args);
+    }
+}
 using Hook_t=uint64_t (*)(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,
                           double,double,double,double,double,double,double,double);
 static uint64_t NativeOpen(uint64_t a1,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,
                            double,double,double,double,double,double,double,double)
 {
+    assert(readers==0); // Native code can reenter catalog refresh; do not hold its read lock here.
+    if(refreshDuringOpen) {
+        std::strcpy(overrideFile.path,"/data/refreshed-mod.ff");
+        std::strcpy(g_files[2].path,"/data/refreshed-core-mod.ff");
+        std::strcpy(g_packages[0].name,"catalog_refreshed");
+    }
     actualPath=(const char*)a1; return 17;
 }
 static void* g_openOriginal=(void*)NativeOpen;
@@ -135,7 +153,29 @@ int main()
     assert(actualPath==request);
     assert(FileOpen_h((uintptr_t)"/app0/zone/other.ff",0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
     assert(actualPath=="/app0/zone/other.ff");
-    std::puts("PASS: external map asset resolution with full table, localization, mod precedence and fallback");
+
+    char preview[288];
+    assert(T7Maps_PreviewFile("zm_ds_house_zw",preview,sizeof(preview)));
+    std::strcpy(g_packages[0].preview,"changed.png");
+    assert(std::strcmp(preview,"preview.png")==0);
+    char shortPreview[3];
+    assert(!T7Maps_PreviewFile("zm_ds_house_zw",shortPreview,sizeof(shortPreview)) && shortPreview[0]==0);
+    assert(!T7Maps_PreviewFile("missing",preview,sizeof(preview)) && preview[0]==0);
+    assert(!T7Maps_PreviewFile("zm_ds_house_zw",nullptr,0));
+
+    refreshDuringOpen=true; overrideEnabled=true;
+    const std::string before=overrideFile.path;
+    assert(FileOpen_h((uintptr_t)request,0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
+    assert(actualPath==before); // Fails when the engine receives the mutable catalog pointer.
+    std::strcpy(g_files[2].path,"/data/original-core-mod.ff");
+    assert(FileOpen_h((uintptr_t)"/app0/zone/core_mod.ff",0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
+    assert(actualPath=="/data/original-core-mod.ff");
+    overrideEnabled=false; exists=true;
+    std::strcpy(g_packages[0].name,"zm_ds_house_zw");
+    assert(FileOpen_h((uintptr_t)request,0,0,0,0,0,0,0,0,0,0,0,0,0)==17);
+    assert(loggedPackage=="zm_ds_house_zw");
+    assert(readers==0);
+    std::puts("PASS: map routing and owned mod/global/preview path snapshots survive catalog mutation during native open");
 }
 '''
 
@@ -144,7 +184,8 @@ def main():
     snippets = [extract("static bool IsZoneFile("), extract("static bool NativeBootstrapFile("),
                 extract("static int MapPackage("),
                 extract("static bool LanguagePrefixed(const char* name)\n{"),
-                extract("static int MapPackageFile("), extract("static uint64_t FileOpen_h(")]
+                extract("static int MapPackageFile("), extract("static uint64_t FileOpen_h("),
+                extract("bool T7Maps_PreviewFile(")]
     with tempfile.TemporaryDirectory(prefix="bo3-ff-route-") as temporary:
         source = Path(temporary) / "map_route.cpp"
         output = Path(temporary) / "map_route"

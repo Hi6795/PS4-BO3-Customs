@@ -24,7 +24,7 @@ const char* T7Maps_CustomMapsLua();
 
 bool T7Maps_MapFile(const char* map, const char* file, char* path, size_t size);
 
-const char* T7Maps_PreviewFile(const char* map);
+bool T7Maps_PreviewFile(const char* map, char* out, size_t size);
 
 bool T7Maps_ModPreviewFile(uint32_t key, char* path, size_t size);
 
