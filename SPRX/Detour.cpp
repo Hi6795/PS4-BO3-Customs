@@ -1,5 +1,33 @@
 #include "headers.hpp"
 
+#include <atomic>
+
+namespace
+{
+std::atomic_flag g_detourLock = ATOMIC_FLAG_INIT;
+uint64_t g_hookedTargets[96]{};
+size_t g_hookedCount = 0;
+
+struct DetourLock
+{
+    DetourLock()
+    {
+        while (g_detourLock.test_and_set(std::memory_order_acquire))
+            sceKernelUsleep(100);
+    }
+    ~DetourLock() { g_detourLock.clear(std::memory_order_release); }
+};
+
+int FindHook(uint64_t target)
+{
+    for (size_t i = 0; i < g_hookedCount; ++i)
+        if (g_hookedTargets[i] == target)
+            return (int)i;
+    return -1;
+}
+}
+
+
 #define VM_PROT_ALL (PROT_READ | PROT_WRITE | PROT_EXEC)
 
 #define DETOUR_REL32_RANGE 0x7FF00000ULL
@@ -242,7 +270,8 @@ static bool Detour_InRel32Range(uint64_t From, uint64_t To)
 
 static bool Detour_WriteVerified(void* Address, const uint8_t* Bytes, size_t Size)
 {
-    sceKernelMprotect(Address, Size, VM_PROT_ALL);
+    if (sceKernelMprotect(Address, Size, VM_PROT_ALL) < 0)
+        return false;
     memcpy(Address, Bytes, Size);
 
     if (memcmp(Address, Bytes, Size) != 0)
@@ -259,6 +288,8 @@ void* Detour_Attach(Detour* This, uint64_t FunctionPtr, void* HookPtr, void** Ou
     if (!This || !FunctionPtr || !HookPtr)
         return 0;
 
+    DetourLock lock;
+
     if (This->Installed)
     {
 
@@ -268,21 +299,10 @@ void* Detour_Attach(Detour* This, uint64_t FunctionPtr, void* HookPtr, void** Ou
         return This->StubPtr;
     }
 
-    {
-        static uint64_t hooked[96];
-        static int hookedCount = 0;
-
-        for (int i = 0; i < hookedCount; ++i)
-        {
-            if (hooked[i] != FunctionPtr)
-                continue;
-
-            return 0;
-        }
-
-        if (hookedCount < (int)(sizeof(hooked) / sizeof(hooked[0])))
-            hooked[hookedCount++] = FunctionPtr;
-    }
+    // Reserve no slot until the native patch has actually been installed.
+    // Failed attaches must remain retryable, and a full registry must fail closed.
+    if (FindHook(FunctionPtr) >= 0 || g_hookedCount >= sizeof(g_hookedTargets) / sizeof(g_hookedTargets[0]))
+        return 0;
 
     memset(This, 0, sizeof(*This));
 
@@ -377,13 +397,13 @@ void* Detour_Attach(Detour* This, uint64_t FunctionPtr, void* HookPtr, void** Ou
 
     Detour_BuildJump(Patch, FunctionPtr, JumpTarget, Absolute);
 
-    if (OutStub)
-        *OutStub = Stub;
-
     if (!Detour_WriteVerified((void*)FunctionPtr, Patch, PatchSize))
     {
-        if (OutStub)
-            *OutStub = 0;
+        // A write may have partially succeeded. Never release a trampoline while
+        // patched code could still jump to it.
+        if (memcmp((void*)FunctionPtr, This->Original, PatchSize) != 0 &&
+            !Detour_WriteVerified((void*)FunctionPtr, This->Original, PatchSize))
+            return 0; // Keep the mapping alive when restoring the original is impossible.
 
         sceKernelMunmap(MapPtr, DETOUR_MAP_SIZE);
         return 0;
@@ -396,20 +416,33 @@ void* Detour_Attach(Detour* This, uint64_t FunctionPtr, void* HookPtr, void** Ou
     This->MapSize = DETOUR_MAP_SIZE;
     This->PatchSize = PatchSize;
     This->Installed = true;
+    g_hookedTargets[g_hookedCount++] = FunctionPtr;
+    if (OutStub)
+        *OutStub = Stub;
 
     return Stub;
 }
 
 void Detour_Detach(Detour* This)
 {
-    if (!This || !This->Installed)
+    if (!This)
         return;
 
-    Detour_WriteVerified(This->FunctionPtr, This->Original, This->PatchSize);
+    DetourLock lock;
+    if (!This->Installed)
+        return;
+
+    if (!Detour_WriteVerified(This->FunctionPtr, This->Original, This->PatchSize))
+        return; // Leave hook and trampoline intact when we cannot restore safely.
 
     sceKernelUsleep(20000);
 
+    // The caller must ensure no other thread is executing this hook/trampoline.
     sceKernelMunmap(This->MapPtr, This->MapSize);
+
+    const int index = FindHook((uint64_t)This->FunctionPtr);
+    if (index >= 0)
+        g_hookedTargets[(size_t)index] = g_hookedTargets[--g_hookedCount];
 
     memset(This, 0, sizeof(*This));
 }
