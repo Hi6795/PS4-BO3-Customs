@@ -53,7 +53,10 @@ static void* g_scriptImportOriginal=(void*)ImportNative;
 static void* g_errorDialogOriginal=(void*)DialogNative;
 static uint32_t g_scriptErrors=0;
 [[maybe_unused]] static void ScriptErrorSummary(const char*) {}
-void T7Maps_TraceDiagnostics(const char*) {}
+static unsigned cacheDiagnostics=0;
+void T7Maps_TraceDiagnostics(const char* why) {
+    if(std::strcmp(why,"BG cache index mismatch")==0) ++cacheDiagnostics;
+}
 static bool RangeReadable(uintptr_t address,size_t size)
 {
     if(!address || address+size<address) return false;
@@ -147,6 +150,9 @@ int main()
     assert(mprotect(page,4096,PROT_NONE)==0);
     assert(!CopyImportName((uintptr_t)page,copied));
     munmap(page,4096);
+    static const char cacheError[]="EXE_ERR_BG_CACHE";
+    assert(ErrorDialog(8,(uintptr_t)cacheError,3,4,5,6,0.25,1.25,2.25,3.25,4.25,5.25,6.25,7.25)==0xC0FFEE);
+    assert(cacheDiagnostics==1 && dialogCalls==9);
     puts("PASS: released-script lifetime, per-VM snapshots, consume/reset and native hook forwarding");
 }
 '''

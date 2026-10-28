@@ -1098,6 +1098,9 @@ static uint64_t ErrorDialog(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, 
     if (message && (strstr(message, "Clientfield Mismatch") || strstr(message, "clientfield mismatch")))
         T7Maps_TraceDiagnostics("clientfield mismatch");
 
+    if (message && strstr(message, "EXE_ERR_BG_CACHE"))
+        T7Maps_TraceDiagnostics("BG cache index mismatch");
+
     if (message && strstr(message, "script error(s)"))
     {
         MissingImport pending[2];
